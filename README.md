@@ -1,0 +1,81 @@
+# Undo Tab
+
+本地优先的 Chrome 扩展：记录误关标签，并按窗口模式分别提供“最近关闭 / 历史记录”。普通数据持久保存；无痕数据只在本次无痕会话内临时保存，关闭最后一个无痕窗口后自动删除。不上传、不同步、无账号。
+
+## 功能
+
+- **最近关闭**：普通窗口与无痕窗口各自记录自己关闭的 http/https 标签。
+- **历史记录**：
+  - 普通窗口只读查询 Chrome 自身历史（`history.search`，`startTime: 0`），可搜索较早的记录，不复制、不删除 Chrome 历史。
+  - 无痕窗口由扩展通过主框架导航事件自行采集，页面未关闭也会出现；刷新、前进/后退、SPA 路由、hash 变化按导航规则累计。
+- **按完整 URL 去重**：同一模式内再次关闭相同 `new URL(url).href` 只更新标题、时间、位置并置顶，不增加第二条；query 参数顺序或 `#fragment` 不同则是不同记录。
+- **独立配额**：普通使用 `normal.maxRecords`；无痕最近关闭使用 `incognito.recentMaxRecords`，无痕历史使用 `incognito.historyMaxRecords`。三个值默认均为 500、范围 1–10000，分别保存、独立裁剪。普通历史只按普通上限限制展示条数。
+- **恢复**：普通记录只打开到普通窗口；无痕记录只打开到仍属于当前会话的无痕窗口，绝不新建无痕窗口复活已结束会话。
+- **宽度**：普通与无痕共用 `popupWidth`（默认 440，范围 360–800），保存后立即生效，可恢复默认。
+- **Favicon**：记录行优先显示网站 favicon，拿不到时回退首字母。
+
+## 数据分区与隐私
+
+| 数据 | 存储位置 | 生命周期 |
+| --- | --- | --- |
+| 设置（schema 2、宽度、分模式上限） | `storage.local` | 持久 |
+| 普通最近关闭 `normal.recent` | `storage.local` | 持久 |
+| 普通活动标签快照 `normal.liveTabs` | `storage.session` | 浏览器会话 |
+| 普通待补写关闭事件 `normal.pendingCloses` | `storage.session` | 浏览器会话 |
+| 无痕会话 `incognito.state`（最近关闭、访问历史、快照、pending、代次） | `storage.session` | 当前无痕会话 |
+
+- 普通与无痕**不混存、不互查、不共享配额**；弹窗由自身窗口的 `Window.incognito` 固定上下文，后台按请求中的 `windowId` 重新确认。
+- 无痕的 URL、标题、访问次数、标签快照和待写事件只写 `storage.session` 与运行时内存，不写 `storage.local`、`storage.sync`、Chrome 历史、文件或网络。
+- 无痕实现的是“最后一个无痕窗口关闭后清空”，不是“最小化 / 失焦 / 关闭弹窗”触发。多无痕窗口共享同一 `sessionId`；关掉一个但还有另一个时保留数据；最后一个关闭后清空，再打开无痕窗口得到全新的空会话。
+- 浏览器重启、扩展重载/更新/禁用会使 `storage.session` 消失；普通关闭记录仍保留。
+
+## 安装与更新
+
+1. 打开 `chrome://extensions`，开启“开发者模式”，选择“加载已解压的扩展程序”，指向本目录。
+2. 在扩展详情页开启“允许在无痕模式下运行”。扩展使用 `"incognito": "spanning"`，普通与无痕事件由同一个 Service Worker 处理。
+3. 首次升级到 0.2.0 时，Chrome 可能提示新增 `history` 与 `webNavigation` 权限，需要确认后重新加载扩展。
+4. 修改代码后，在 `chrome://extensions` 点击扩展的“重新加载”。重新加载会清空 `storage.session` 中的无痕会话与普通活动快照；普通最近关闭和设置保留。
+
+无需构建步骤，直接加载源目录即可。
+
+## 使用
+
+- 点击工具栏图标打开弹窗，默认进入“最近关闭”、空搜索。
+- 点击“最近关闭 / 历史记录”切换；切换保留搜索词，页码回到第一页。
+- 点击记录行在新标签打开；删除按钮只删除该条记录。普通历史没有删除按钮，设置中提供“在 Chrome 中管理历史”入口。
+- 设置页只修改**当前窗口模式**的记录上限；下调上限时先确认对应列表将删除的条数，绝不删除 Chrome 历史。
+- 无痕设置提供“最近关闭最多保留多少条”和“历史记录最多保留多少条”两个输入框及各自的保存按钮；下调某一项只预览、裁剪对应列表，另一列表不受影响。
+- 旧版无痕共用上限会自动填入两个新字段。例如原值 800，升级后两项都为 800，可再分别修改；设置持久保存，关闭无痕窗口仍会清除本次记录。
+- 无痕设置提供“清空本次记录”，清除本次无痕会话的两个集合与待写事件，但会话本身仍有效。
+
+## 数据规则
+
+- URL 去重键：`new URL(url).href`，保留路径、query 参数顺序和 `#fragment`。
+- 关闭事件记录 `closeEventId`、`closedAt`、顺序号；条目使用独立 `id`。重试同一事件幂等；较旧失败事件晚到不会覆盖较新的标题、时间或置顶顺序。
+- 清空集合会提升该集合代次并取消其旧 pending；单条删除会取消同 URL 的旧 pending，之后真实关闭/访问仍可生成新条目。
+- 单条删除会在同一次持久写入中记录删除标记；即使随后 `storage.session` 的 pending 清理失败，worker 重建后补写也不会让已删除记录复活。
+- 无痕访问只处理 `frameId === 0`、http/https、且经 `tabs.get` 确认为无痕标签的 `onCommitted` / `onHistoryStateUpdated` / `onReferenceFragmentUpdated`；忽略子框架和预渲染标记，标题/favicon 更新不算新访问。
+- 普通历史使用 `chrome.history.search({ text, startTime: 0, maxResults: normal.maxRecords })`，结果按 `lastVisitTime` 倒序、每页 50 条；达到上限只说明“展示上限”，不承诺完整列出全部匹配项。
+- 旧 schema 1 数据在后台初始化队列中幂等迁移：保留去重后的普通记录、普通 pending 与设置，删除旧混合 `history.records`、旧 `live.tabs` 中的无痕内容；旧持久无痕记录直接丢弃，不迁入新会话。
+
+## 开发与测试
+
+后续开发先阅读 [AGENTS.md](AGENTS.md)，需求细节见 [修改方案](docs/MODIFICATION_PLAN.md)，浏览器验收步骤见 [验收清单](docs/MANUAL_TESTS.md)。
+
+```bash
+npm test           # Node 单元/集成测试（mock Chrome）
+npm run smoke      # 真实 Chrome 冒烟：普通窗口、历史、迁移、重启
+node scripts/test-limits-ui.mjs # Chrome DOM + 模拟无痕后台：独立上限设置界面
+```
+
+- 单元测试覆盖：schema 2 设置、URL 去重、普通存储 pending/代次、无痕会话生命周期、导航采集、Chrome 历史查询、恢复窗口选择、消息上下文隔离、迁移、弹窗文案。
+- 冒烟测试使用 CDP `Extensions.loadUnpacked`（Chrome 156 已移除 `--load-extension`）。机器报告和验证截图由脚本运行时重新生成，可在验证后清理。
+- Chrome 156 通过 CDP 加载的扩展在开启无痕访问或 `chrome.runtime.reload()` 时会被标记为 `DISABLE_UNSUPPORTED_DEVELOPER_EXTENSION`。因此真实无痕窗口、无痕权限撤销、扩展重载和真实工具栏弹窗**未自动化**，必须在常规 Chrome 中按 [验收清单](docs/MANUAL_TESTS.md) 手工验收；报告中跳过项不计通过。
+
+## 已知边界
+
+- 只支持 http/https 页面，不恢复 `chrome://`、扩展页、`file://` 等。
+- “最近关闭”恢复的是 URL，不恢复表单内容、滚动位置或标签组。
+- 普通历史的展示条数受普通 `maxRecords` 限制；扩展不会为了“完整历史”而把 Chrome 历史复制到本地。
+- 扩展启用前已经结束的无痕访问无法补录；Service Worker 休眠后重建快照、打开弹窗或刷新列表都不算新访问。
+- 无痕数据依赖 `storage.session` 与窗口事件，浏览器崩溃/强杀期间不承诺最后事件必达；下次启动或唤醒发现没有无痕窗口时会清理遗留状态。

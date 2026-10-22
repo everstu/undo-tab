@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light" />
+    <title>Undo Tab</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="booting">
+    <div class="app">
+      <section id="list-view" class="view view-list">
+        <div class="search-bar">
+          <input
+            id="search"
+            class="search-input"
+            type="search"
+            placeholder="搜索标题或网址…"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="搜索标题或网址"
+          />
+        </div>
+
+        <nav class="toolbar" aria-label="视图与分页">
+          <div class="tabs" role="tablist" aria-label="记录视图">
+            <button id="tab-recent" class="tab" type="button" role="tab" data-view="recent" aria-selected="true">
+              最近关闭
+            </button>
+            <button id="tab-history" class="tab" type="button" role="tab" data-view="history" aria-selected="false">
+              历史记录
+            </button>
+          </div>
+          <div class="pager">
+            <button id="prev-page" class="pager-btn" type="button" aria-label="上一页" title="上一页" disabled>‹</button>
+            <span id="page-label" class="page-label" aria-live="polite">0/0</span>
+            <button id="next-page" class="pager-btn" type="button" aria-label="下一页" title="下一页" disabled>›</button>
+          </div>
+        </nav>
+
+        <div id="banner" class="banner" role="status" hidden></div>
+
+        <main id="content" class="content">
+          <ul id="list" class="list" aria-label="记录列表"></ul>
+          <p id="empty" class="empty" hidden></p>
+        </main>
+
+        <footer class="footer">
+          <span id="counts" class="counts"></span>
+          <button id="open-settings" class="link-btn" type="button">设置</button>
+        </footer>
+      </section>
+
+      <section id="settings-view" class="view view-settings" hidden>
+        <header class="settings-head">
+          <button id="back-to-list" class="link-btn" type="button">‹ 返回列表</button>
+          <h1 class="settings-title">设置</h1>
+        </header>
+
+        <div class="settings-body">
+          <section class="settings-block">
+            <h2 class="settings-h2">保存条数</h2>
+            <p id="max-scope-desc" class="settings-desc"></p>
+            <div class="field-row">
+              <label class="field-label" for="max-records" id="max-records-label">最多保存多少条</label>
+              <input
+                id="max-records"
+                class="field-input"
+                type="number"
+                inputmode="numeric"
+                min="1"
+                max="10000"
+                step="1"
+              />
+              <button id="save-max-records" class="primary-btn" type="button">保存</button>
+            </div>
+            <p id="max-records-error" class="field-error" role="alert" hidden></p>
+            <p id="max-records-status" class="status-text" role="status" hidden></p>
+            <div id="history-limit-block" class="history-limit-block" hidden>
+              <div class="field-row">
+                <label class="field-label" for="history-max-records">历史记录最多保留多少条</label>
+                <input
+                  id="history-max-records"
+                  class="field-input"
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  max="10000"
+                  step="1"
+                />
+                <button id="save-history-max-records" class="primary-btn" type="button">保存</button>
+              </div>
+              <p id="history-max-records-error" class="field-error" role="alert" hidden></p>
+              <p id="history-max-records-status" class="status-text" role="status" hidden></p>
+            </div>
+            <div id="trim-confirm" class="confirm-box" hidden>
+              <p id="trim-confirm-text" class="confirm-text"></p>
+              <div class="confirm-actions">
+                <button id="trim-confirm-yes" class="primary-btn" type="button">确认保存</button>
+                <button id="trim-confirm-no" class="secondary-btn" type="button">取消</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-block">
+            <h2 class="settings-h2">弹窗宽度</h2>
+            <p class="settings-desc">默认 440px，可设置 360–800px，普通与无痕窗口共用，保存后立即生效。</p>
+            <div class="field-row">
+              <label class="field-label" for="popup-width">弹窗宽度（px）</label>
+              <input
+                id="popup-width"
+                class="field-input"
+                type="number"
+                inputmode="numeric"
+                min="360"
+                max="800"
+                step="1"
+              />
+              <button id="save-popup-width" class="primary-btn" type="button">保存</button>
+            </div>
+            <p id="popup-width-error" class="field-error" role="alert" hidden></p>
+            <div class="field-actions">
+              <button id="reset-popup-width" class="secondary-btn" type="button">恢复默认宽度（440px）</button>
+              <span id="popup-width-status" class="status-text" role="status" hidden></span>
+            </div>
+          </section>
+
+          <section id="incognito-block" class="settings-block" hidden>
+            <h2 class="settings-h2">本次无痕会话</h2>
+            <p id="incognito-status" class="settings-desc"></p>
+            <button id="clear-incognito-data" class="danger-btn" type="button">清空本次记录</button>
+            <div id="clear-incognito-confirm" class="confirm-box" hidden>
+              <p class="confirm-text">确认清空本次无痕会话的最近关闭与访问历史？普通数据不受影响。</p>
+              <div class="confirm-actions">
+                <button id="clear-incognito-yes" class="danger-btn" type="button">确认清空</button>
+                <button id="clear-incognito-no" class="secondary-btn" type="button">取消</button>
+              </div>
+            </div>
+            <p id="clear-incognito-status" class="field-error" role="alert" hidden></p>
+          </section>
+
+          <section id="clear-view-block" class="settings-block">
+            <h2 class="settings-h2">清空当前列表</h2>
+            <p id="clear-view-desc" class="settings-desc"></p>
+            <button id="clear-view" class="danger-btn" type="button">清空当前列表</button>
+            <div id="clear-view-confirm" class="confirm-box" hidden>
+              <p id="clear-view-confirm-text" class="confirm-text"></p>
+              <div class="confirm-actions">
+                <button id="clear-view-yes" class="danger-btn" type="button">确认清空</button>
+                <button id="clear-view-no" class="secondary-btn" type="button">取消</button>
+              </div>
+            </div>
+            <p id="clear-view-status" class="field-error" role="alert" hidden></p>
+          </section>
+
+          <section id="manage-history-block" class="settings-block" hidden>
+            <h2 class="settings-h2">Chrome 历史</h2>
+            <p class="settings-desc">普通历史来自 Chrome 自身，扩展只读查询，不复制也不删除。</p>
+            <button id="manage-history" class="secondary-btn" type="button">在 Chrome 中管理历史</button>
+            <p id="manage-history-status" class="field-error" role="alert" hidden></p>
+          </section>
+
+          <section class="settings-block">
+            <h2 class="settings-h2">数据说明</h2>
+            <p id="data-note" class="settings-desc"></p>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "undo-tab",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Undo Tab Chrome 扩展（无打包步骤，package.json 仅用于 Node 测试与冒烟脚本）",
+  "scripts": {
+    "test": "node --test",
+    "test:in-process": "node --test --test-isolation=none \"tests/**/*.test.js\"",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}
