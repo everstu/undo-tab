@@ -24,7 +24,7 @@
 - `background/service-worker.js` 是入口，`background/worker.js` 装配监听器与串行队列。监听器同步注册；窗口、标签、导航、设置和删除操作通过现有协调机制处理。
 - `incognito-session.js` 管理无痕会话，`incognito-windows.js` 校正窗口集合。区分“查询失败”和“确认没有窗口/权限已撤销”；未知状态不能直接触发数据删除。
 - 捕获事件的会话 ID 与清空代次，拒绝跨会话迟到写入。同一有效会话中新增窗口时，应使用处理时已同步的窗口集合，不能因入队时名单过旧而漏记首个标签。
-- `normal-store.js`、无痕会话存储负责去重、配额与 pending；删除/清空同时使旧待补写事件失效。删除标记应和删除数据可靠保存，session 清理失败不能使记录复活。
+- `normal-store.js`、无痕会话存储负责去重、配额与 pending；删除/清空同时使旧待补写事件失效。删除标记应和删除数据可靠保存，session 清理失败不能使记录复活；标记只在仍挡住旧 pending 时保留。无痕状态拆成 `incognito.*` 多个 key，相关部分须同一次写入。
 - `tab-tracker.js` 提前缓存关闭所需元数据；`navigation-tracker.js` 采集无痕主框架访问；`history-service.js` 查询普通 Chrome 历史。导航、标题补齐和关闭是不同事件，不能相互代替。
 - `messenger.js` 校验调用方和窗口上下文，只返回请求模式的数据。`restore-service.js` 保持打开模式；无痕会话结束后拒绝旧恢复请求。
 - 修改前亲自完整阅读将修改的代码，保持改动围绕本次需求。页面标题、URL 使用安全文本渲染；扩展内脚本随包提供。

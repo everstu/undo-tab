@@ -1,4 +1,11 @@
-import { ERROR_CODES, MAX_QUERY_LENGTH, MESSAGES, MODES, VIEWS } from '../shared/constants.js';
+import {
+  ERROR_CODES,
+  MAX_QUERY_LENGTH,
+  MESSAGES,
+  MODES,
+  QUOTA_WARN_RATIO,
+  VIEWS,
+} from '../shared/constants.js';
 import {
   describeFieldError,
   mergeSettings,
@@ -6,6 +13,7 @@ import {
   validateMaxRecords,
   validatePopupWidth,
 } from '../shared/settings.js';
+import { entrySignature, matchesQuery } from '../shared/entries.js';
 import { isRestorableUrl } from '../shared/urls.js';
 import { RPC_ERROR_MESSAGES, isAllowedIncognitoAccess, openUrl } from './restore-service.js';
 
@@ -43,19 +51,6 @@ function sanitizeQuery(value) {
 
 function validateView(value) {
   return value === VIEWS.recent || value === VIEWS.history ? value : null;
-}
-
-function matchesQuery(entry, needle) {
-  if (!needle) return true;
-  return (
-    String(entry.title || '').toLowerCase().includes(needle) ||
-    String(entry.url || '').toLowerCase().includes(needle)
-  );
-}
-
-function topSignature(entry) {
-  if (!entry) return '';
-  return `${entry.lastEventId || entry.id}:${entry.lastVisitedAt || entry.closedAt || ''}:${entry.title || ''}`;
 }
 
 /**
@@ -111,6 +106,7 @@ export function createMessageHandler({
         incognitoAllowed,
         session: { active: info.active, sessionId: info.sessionId, windows: info.windows },
         pendingCloseCount: await pendingCount(context.mode),
+        storage: context.mode === MODES.incognito ? await incognitoSession.getStorageStatus() : null,
       },
     };
   }
@@ -141,7 +137,7 @@ export function createMessageHandler({
             limitReached: false,
             sessionId: null,
             sessionActive: false,
-            topSignature: topSignature(all[0]),
+            topSignature: entrySignature(all[0]),
             pendingCloseCount: await pendingCount(MODES.normal),
           },
         };
@@ -187,6 +183,7 @@ export function createMessageHandler({
         sessionActive: result.active === true,
         topSignature: result.topSignature || '',
         pendingCloseCount: await pendingCount(MODES.incognito),
+        storageIssue: incognitoSession.peekStorageIssue(),
       },
     };
   }
@@ -363,7 +360,14 @@ export function createMessageHandler({
       };
     }
     const preview = await incognitoSession.previewTrim(limitView, validation.value);
-    return { ok: true, data: { ...preview, limit: validation.value } };
+    // 按新上限估算两个列表都存满时的占用；接近 session 配额时提示，但不阻止保存。
+    const settings = await settingsStore.get();
+    const estimate = await incognitoSession.estimateBytes({
+      ...settings.incognito,
+      [limitView === VIEWS.history ? 'historyMaxRecords' : 'recentMaxRecords']: validation.value,
+    });
+    const quotaWarning = estimate.projectedBytes > estimate.quotaBytes * QUOTA_WARN_RATIO ? estimate : null;
+    return { ok: true, data: { ...preview, limit: validation.value, quotaWarning } };
   }
 
   async function dispatch(message) {

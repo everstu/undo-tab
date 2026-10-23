@@ -165,6 +165,7 @@ test('单删时 session 清理失败，旧 pending 也不能复活（新实例�
   assert.equal(deletion.removed, true);
   chrome.storage.session.control.failWrites = false;
   assert.equal((await store.getEntries()).length, 0);
+  assert.deepEqual(Object.keys(chrome.storage.local.data['normal.recent'].deleted), ['https://example.com/a']);
 
   // 模拟 worker 重建：新实例读取同一 local/session，删除标记仍在。
   const rebuilt = createNormalStore({
@@ -176,6 +177,8 @@ test('单删时 session 清理失败，旧 pending 也不能复活（新实例�
   assert.equal(retried.applied, 0);
   assert.equal(retried.pending, 0);
   assert.equal((await rebuilt.getEntries()).length, 0);
+  // 旧 pending 已取消并落盘，删除标记随之清理。
+  assert.deepEqual(chrome.storage.local.data['normal.recent'].deleted, {});
 
   // 删除之后真实发生的新关闭仍然可以写入。
   await rebuilt.recordClose(closeEvent('e3', 'https://example.com/a', 4000), 500);
@@ -198,4 +201,57 @@ test('updateLimitAndSettings 同一次 local 写入设置与裁剪', async () =>
   assert.equal(result.trimmed, 1);
   assert.equal((await store.getEntries()).length, 1);
   assert.equal(chrome.storage.local.data.settings.normal.maxRecords, 1);
+});
+
+test('单删时没有同 URL 待补写则不写删除标记；local 条目不存 urlKey', async () => {
+  const { store, chrome } = setup({ now: () => 3000 });
+  await store.recordClose(closeEvent('e1', 'https://example.com/a', 1000), 500);
+  await store.recordClose(closeEvent('e2', 'https://example.com/b', 2000), 500);
+  const stored = chrome.storage.local.data['normal.recent'];
+  assert.equal('urlKey' in stored.entries[0], false);
+  const entries = await store.getEntries();
+  assert.equal(entries[0].urlKey, 'https://example.com/b');
+
+  await store.deleteEntry(entries[0].id);
+  assert.deepEqual(chrome.storage.local.data['normal.recent'].deleted, {});
+  assert.equal((await store.getEntries()).length, 1);
+});
+
+test('有同 URL 待补写且 session 清理成功时，删除标记写入后随即移除', async () => {
+  const { store, chrome } = setup({ now: () => 3000 });
+  await store.recordClose(closeEvent('e1', 'https://example.com/a', 1000), 500);
+  chrome.storage.local.control.failWrites = true;
+  await assert.rejects(
+    () => store.recordClose(closeEvent('e2', 'https://example.com/a', 2000), 500),
+    StorageFailureError,
+  );
+  chrome.storage.local.control.failWrites = false;
+  const id = (await store.getEntries())[0].id;
+  await store.deleteEntry(id);
+  assert.equal(await store.getPendingCount(), 0);
+  assert.deepEqual(chrome.storage.local.data['normal.recent'].deleted, {});
+  assert.equal((await store.retryPending(500)).applied, 0);
+  assert.equal((await store.getEntries()).length, 0);
+});
+
+test('启动清理只保留仍挡住待补写事件的删除标记', async () => {
+  const { store, chrome } = setup();
+  chrome.storage.local.data['normal.recent'] = {
+    generation: 0,
+    lastOrder: 0,
+    entries: [],
+    deleted: { 'https://example.com/a': 5000, 'https://example.com/b': 5000, 'https://example.com/c': 5000 },
+  };
+  chrome.storage.session.data['normal.pendingCloses'] = [
+    closeEvent('old-a', 'https://example.com/a', 4000, { generation: 0 }),
+    closeEvent('new-b', 'https://example.com/b', 6000, { generation: 0 }),
+  ];
+  const result = await store.startupMaintenance(500);
+  assert.equal(result.prunedMarkers, 2);
+  assert.equal(result.trimmed, 0);
+  assert.deepEqual(chrome.storage.local.data['normal.recent'].deleted, { 'https://example.com/a': 5000 });
+
+  chrome.storage.session.data['normal.pendingCloses'] = [];
+  await store.startupMaintenance(500);
+  assert.deepEqual(chrome.storage.local.data['normal.recent'].deleted, {});
 });

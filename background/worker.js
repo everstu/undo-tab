@@ -14,7 +14,7 @@ import { createTabTracker } from './tab-tracker.js';
  *
  * 普通与无痕数据完全分域：
  * - 普通最近关闭写 storage.local，持久保存；
- * - 无痕最近关闭与访问历史只写 storage.session 的 incognito.state，
+ * - 无痕最近关闭与访问历史只写 storage.session 的 incognito.* 各 key，
  *   最后一个无痕窗口关闭后自动清空。
  * 所有窗口/标签/导航事件与消息操作共用同一条串行队列。
  */
@@ -60,14 +60,30 @@ export function createUndoTabWorker({ chrome, logger = console }) {
 
   let readyPromise = null;
 
+  /**
+   * 按当前上限裁剪已有集合（上限收紧后不必等到下次写入），并清理无用的普通删除标记。
+   * 尽力而为：失败时下次写入仍会按上限裁剪，不阻断初始化。
+   */
+  async function enforceLimits(settings) {
+    try {
+      await normalStore.startupMaintenance(settings.normal.maxRecords);
+      await incognitoSession.trimView('recent', settings.incognito.recentMaxRecords);
+      await incognitoSession.trimView('history', settings.incognito.historyMaxRecords);
+    } catch (error) {
+      logger.warn('undo-tab: 启动时按上限整理记录失败，稍后写入时再裁剪', error && error.name ? error.name : 'error');
+    }
+  }
+
   function ensureReady() {
     if (!readyPromise) {
       readyPromise = (async () => {
         // 迁移在前；随后先核对无痕窗口、结束失效会话，再重建标签快照。
         await migrateLegacyData({ localArea, sessionArea, logger });
-        await settingsStore.ensure();
+        // ensure 会把越界的已保存上限收紧到当前范围（10–1000）。
+        const settings = await settingsStore.ensure();
         await incognitoWindows.sync();
         await tracker.init();
+        await enforceLimits(settings);
       })().catch((error) => {
         readyPromise = null;
         throw error;

@@ -149,37 +149,37 @@ test('普通历史来自 Chrome 只读查询，删除与清空被拒绝', async 
 
 test('普通上限只裁剪普通最近关闭，无痕配额不变', async () => {
   const { handler, sender, normalWin, incognitoWin, normalStore, incognitoSession, settingsStore } = await setup();
-  await normalStore.recordClose(closeEvent('n1', 'https://normal.example/1', 1000), 500);
-  await normalStore.recordClose(closeEvent('n2', 'https://normal.example/2', 2000), 500);
-  await incognitoSession.recordClose(closeEvent('i1', 'https://incognito.example/1', 1000), 500);
-  await incognitoSession.recordClose(closeEvent('i2', 'https://incognito.example/2', 2000), 500);
+  for (let i = 1; i <= 12; i += 1) {
+    await normalStore.recordClose(closeEvent(`n${i}`, `https://normal.example/${i}`, 1000 * i), 500);
+    await incognitoSession.recordClose(closeEvent(`i${i}`, `https://incognito.example/${i}`, 1000 * i), 500);
+  }
 
   const preview = await handler(
-    { type: 'undoTab:getTrimPreview', windowId: normalWin.id, maxRecords: 1 },
+    { type: 'undoTab:getTrimPreview', windowId: normalWin.id, maxRecords: 10 },
     sender,
   );
-  assert.equal(preview.data.recent, 1);
+  assert.equal(preview.data.recent, 2);
   assert.equal(preview.data.history, 0);
 
   const updated = await handler(
-    { type: 'undoTab:updateSettings', windowId: normalWin.id, patch: { maxRecords: 1 } },
+    { type: 'undoTab:updateSettings', windowId: normalWin.id, patch: { maxRecords: 10 } },
     sender,
   );
   assert.equal(updated.ok, true);
-  assert.equal(updated.data.trimmed.recent, 1);
-  assert.equal((await normalStore.getEntries()).length, 1);
-  assert.equal((await incognitoSession.query('recent', '')).total, 2);
+  assert.equal(updated.data.trimmed.recent, 2);
+  assert.equal((await normalStore.getEntries()).length, 10);
+  assert.equal((await incognitoSession.query('recent', '')).total, 12);
   assert.deepEqual((await settingsStore.get()).incognito, { recentMaxRecords: 100, historyMaxRecords: 100 });
-  assert.equal((await settingsStore.get()).normal.maxRecords, 1);
+  assert.equal((await settingsStore.get()).normal.maxRecords, 10);
   assert.equal((await settingsStore.get()).normal.historyMaxRecords, 100);
 
   const incognitoPreview = await handler(
-    { type: 'undoTab:getTrimPreview', windowId: incognitoWin.id, view: 'recent', maxRecords: 1 },
+    { type: 'undoTab:getTrimPreview', windowId: incognitoWin.id, view: 'recent', maxRecords: 10 },
     sender,
   );
   assert.deepEqual(
     { recent: incognitoPreview.data.recent, history: incognitoPreview.data.history },
-    { recent: 1, history: 0 },
+    { recent: 2, history: 0 },
   );
 });
 

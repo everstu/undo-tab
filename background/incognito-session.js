@@ -1,11 +1,35 @@
-import { STORAGE_KEYS } from '../shared/constants.js';
+import {
+  APPLIED_VISIT_EVENT_LIMIT,
+  ESTIMATED_ENTRY_BYTES,
+  SESSION_QUOTA_BYTES,
+  STORAGE_KEYS,
+} from '../shared/constants.js';
+import { entrySignature, matchesQuery } from '../shared/entries.js';
 import { createQueue } from '../shared/queue.js';
 import { fallbackTitle, urlKey } from '../shared/urls.js';
 import { StorageFailureError } from './normal-store.js';
+import {
+  applyRecentClose,
+  compareClosedDesc,
+  normalizeRecentEntry,
+  serializeEntries,
+} from './recent-entries.js';
 
 const ACTIVE = 'active';
 const ENDED = 'ended';
-const APPLIED_LIMIT = 200;
+
+/**
+ * 无痕状态按用途拆成 4 个 session key，每次只重写变动的部分：
+ * 标签更新只写快照，不再整份重写最近关闭与访问历史。
+ * 需要同时变动的部分（如删除条目 + 取消 pending）在同一次 set 中写入，保持原子。
+ */
+const PART_KEYS = Object.freeze({
+  meta: STORAGE_KEYS.incognitoMeta,
+  recent: STORAGE_KEYS.incognitoRecent,
+  history: STORAGE_KEYS.incognitoHistory,
+  liveTabs: STORAGE_KEYS.incognitoLiveTabs,
+});
+const ALL_PARTS = Object.freeze(Object.keys(PART_KEYS));
 
 function emptyState() {
   return {
@@ -16,8 +40,6 @@ function emptyState() {
     clearGeneration: { recent: 0, history: 0 },
     recent: [],
     history: [],
-    deletedRecent: {},
-    deletedHistory: {},
     liveTabs: [],
     pending: [],
     appliedVisitEvents: [],
@@ -26,34 +48,8 @@ function emptyState() {
   };
 }
 
-function normalizeDeleted(raw) {
-  const result = {};
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
-  for (const [key, value] of Object.entries(raw)) {
-    if (urlKey(key) === key && Number.isFinite(value) && value >= 0) result[key] = value;
-  }
-  return result;
-}
-
-function normalizeRecentEntry(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const key = urlKey(raw.url);
-  if (!key || typeof raw.id !== 'string' || raw.id === '') return null;
-  if (!Number.isFinite(raw.closedAt)) return null;
-  return {
-    id: raw.id,
-    url: raw.url,
-    urlKey: key,
-    title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : fallbackTitle(raw.url),
-    closedAt: raw.closedAt,
-    order: Number.isFinite(raw.order) ? raw.order : raw.closedAt,
-    originalWindowId: Number.isInteger(raw.originalWindowId) ? raw.originalWindowId : -1,
-    originalIndex: Number.isInteger(raw.originalIndex) ? raw.originalIndex : 0,
-    wasPinned: raw.wasPinned === true,
-    hasFavicon: raw.hasFavicon === true,
-    windowClosing: raw.windowClosing === true,
-    lastEventId: typeof raw.lastEventId === 'string' ? raw.lastEventId : '',
-  };
+function compareVisitedDesc(a, b) {
+  return (b.lastVisitedAt - a.lastVisitedAt) || ((b.order || 0) - (a.order || 0));
 }
 
 function normalizeHistoryEntry(raw) {
@@ -107,12 +103,13 @@ function normalizePending(raw) {
   });
 }
 
+/** 规范化合并后的无痕状态：{ ...meta, recent, history, liveTabs }。 */
 export function normalizeIncognitoState(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const recent = (Array.isArray(source.recent) ? source.recent : []).map(normalizeRecentEntry).filter(Boolean);
-  recent.sort((a, b) => (b.closedAt - a.closedAt) || ((b.order || 0) - (a.order || 0)));
+  recent.sort(compareClosedDesc);
   const history = (Array.isArray(source.history) ? source.history : []).map(normalizeHistoryEntry).filter(Boolean);
-  history.sort((a, b) => (b.lastVisitedAt - a.lastVisitedAt) || ((b.order || 0) - (a.order || 0)));
+  history.sort(compareVisitedDesc);
   const sessionId = typeof source.sessionId === 'string' && source.sessionId ? source.sessionId : null;
   const status = source.status === ACTIVE && sessionId ? ACTIVE : ENDED;
   const generation = source.clearGeneration && typeof source.clearGeneration === 'object' ? source.clearGeneration : {};
@@ -127,17 +124,58 @@ export function normalizeIncognitoState(raw) {
     },
     recent,
     history,
-    deletedRecent: normalizeDeleted(source.deletedRecent),
-    deletedHistory: normalizeDeleted(source.deletedHistory),
     liveTabs: (Array.isArray(source.liveTabs) ? source.liveTabs : []).map(normalizeSnapshot).filter(Boolean),
     pending: normalizePending(source.pending),
     appliedVisitEvents: Array.isArray(source.appliedVisitEvents)
-      ? source.appliedVisitEvents.filter((id) => typeof id === 'string').slice(-APPLIED_LIMIT)
+      ? source.appliedVisitEvents.filter((id) => typeof id === 'string').slice(-APPLIED_VISIT_EVENT_LIMIT)
       : [],
     lastOrder: Number.isFinite(source.lastOrder) ? source.lastOrder : 0,
     updatedAt: Number.isFinite(source.updatedAt) ? source.updatedAt : 0,
   };
 }
+
+function serializePart(state, part) {
+  switch (part) {
+    case 'recent':
+      return serializeEntries(state.recent);
+    case 'history':
+      return serializeEntries(state.history);
+    case 'liveTabs':
+      return state.liveTabs;
+    default:
+      return {
+        sessionId: state.sessionId,
+        status: state.status,
+        needsClear: state.needsClear,
+        windows: state.windows,
+        clearGeneration: state.clearGeneration,
+        pending: state.pending,
+        appliedVisitEvents: state.appliedVisitEvents,
+        lastOrder: state.lastOrder,
+        updatedAt: state.updatedAt,
+      };
+  }
+}
+
+function isQuotaError(error) {
+  return /quota/i.test(String(error && error.message));
+}
+
+const encoder = new TextEncoder();
+
+/** Chrome 按“key 长度 + 值的 JSON 长度”计配额；这里用 UTF-8 字节数估算，偏保守。 */
+function itemBytes(key, value) {
+  return encoder.encode(key).length + encoder.encode(JSON.stringify(value)).length;
+}
+
+/** 补写时已有确定结论、不再保留 pending 的结果。 */
+const SETTLED_RETRY_REASONS = new Set([
+  'duplicate',
+  'older',
+  'stale-session',
+  'stale-generation',
+  'session-ended',
+]);
 
 function trimList(list, maxRecords) {
   const limit = Number.isInteger(maxRecords) && maxRecords > 0 ? maxRecords : 0;
@@ -146,61 +184,17 @@ function trimList(list, maxRecords) {
   return removed;
 }
 
+/**
+ * 无痕不需要删除标记：删除条目与取消同 URL 的 pending 在同一次写入中完成，
+ * 不会出现“条目已删、旧 pending 仍在”的存储状态。
+ */
 function applyCloseEntry(state, event, uuid) {
   if (state.status !== ACTIVE || !state.sessionId) return { applied: false, reason: 'session-ended' };
   if (event.sessionId !== state.sessionId) return { applied: false, reason: 'stale-session' };
   if (event.generation !== state.clearGeneration.recent) return { applied: false, reason: 'stale-generation' };
-  const deletedAt = state.deletedRecent[event.urlKey];
-  if (Number.isFinite(deletedAt)) {
-    if (event.closedAt <= deletedAt) return { applied: false, reason: 'deleted' };
-    delete state.deletedRecent[event.urlKey];
-  }
-  const index = state.recent.findIndex((entry) => entry.urlKey === event.urlKey);
-  if (index >= 0) {
-    const existing = state.recent[index];
-    if (existing.lastEventId && existing.lastEventId === event.eventId) {
-      return { applied: false, reason: 'duplicate', entryId: existing.id };
-    }
-    if (
-      event.closedAt < existing.closedAt ||
-      (event.closedAt === existing.closedAt && event.order <= existing.order)
-    ) {
-      return { applied: false, reason: 'older', entryId: existing.id };
-    }
-    const updated = {
-      ...existing,
-      title: event.title || existing.title || fallbackTitle(event.url),
-      closedAt: event.closedAt,
-      order: event.order,
-      originalWindowId: event.originalWindowId,
-      originalIndex: event.originalIndex,
-      wasPinned: event.wasPinned,
-      hasFavicon: event.hasFavicon,
-      windowClosing: event.windowClosing,
-      lastEventId: event.eventId,
-    };
-    state.recent.splice(index, 1);
-    state.recent.unshift(updated);
-    state.lastOrder = Math.max(state.lastOrder || 0, event.order);
-    return { applied: true, entryId: updated.id };
-  }
-  const entry = {
-    id: uuid(),
-    url: event.url,
-    urlKey: event.urlKey,
-    title: event.title || fallbackTitle(event.url),
-    closedAt: event.closedAt,
-    order: event.order,
-    originalWindowId: event.originalWindowId,
-    originalIndex: event.originalIndex,
-    wasPinned: event.wasPinned,
-    hasFavicon: event.hasFavicon,
-    windowClosing: event.windowClosing,
-    lastEventId: event.eventId,
-  };
-  state.recent.unshift(entry);
-  state.lastOrder = Math.max(state.lastOrder || 0, event.order);
-  return { applied: true, entryId: entry.id };
+  const result = applyRecentClose(state.recent, event, uuid);
+  if (result.applied) state.lastOrder = Math.max(state.lastOrder || 0, event.order);
+  return result;
 }
 
 function applyVisitEntry(state, event, uuid) {
@@ -208,12 +202,6 @@ function applyVisitEntry(state, event, uuid) {
   if (event.sessionId !== state.sessionId) return { applied: false, reason: 'stale-session' };
   if (event.generation !== state.clearGeneration.history) return { applied: false, reason: 'stale-generation' };
   if (state.appliedVisitEvents.includes(event.eventId)) return { applied: false, reason: 'duplicate' };
-
-  const deletedAt = state.deletedHistory[event.urlKey];
-  if (Number.isFinite(deletedAt)) {
-    if (event.visitedAt <= deletedAt) return { applied: false, reason: 'deleted' };
-    delete state.deletedHistory[event.urlKey];
-  }
 
   const index = state.history.findIndex((entry) => entry.urlKey === event.urlKey);
   if (index >= 0) {
@@ -249,13 +237,17 @@ function applyVisitEntry(state, event, uuid) {
       lastEventId: event.eventId,
     });
   }
-  state.history.sort((a, b) => (b.lastVisitedAt - a.lastVisitedAt) || ((b.order || 0) - (a.order || 0)));
+  state.history.sort(compareVisitedDesc);
   state.lastOrder = Math.max(state.lastOrder || 0, event.order);
   state.appliedVisitEvents.push(event.eventId);
-  if (state.appliedVisitEvents.length > APPLIED_LIMIT) {
-    state.appliedVisitEvents.splice(0, state.appliedVisitEvents.length - APPLIED_LIMIT);
+  if (state.appliedVisitEvents.length > APPLIED_VISIT_EVENT_LIMIT) {
+    state.appliedVisitEvents.splice(0, state.appliedVisitEvents.length - APPLIED_VISIT_EVENT_LIMIT);
   }
   return { applied: true };
+}
+
+function partForView(view) {
+  return view === 'history' ? 'history' : 'recent';
 }
 
 export function createIncognitoSession({
@@ -268,29 +260,70 @@ export function createIncognitoSession({
   const enqueue = createQueue();
   let state = null;
   let loadPromise = null;
-  let needsSave = false;
+  /** 内存中已变更、尚未成功写入的部分；写入失败时保留，下次一起重写。 */
+  const dirty = new Set();
+  /** 各部分序列化后的字节数缓存；该部分变更时失效。 */
+  const partBytes = new Map();
+  /** 最近一次写入失败的原因：'quota' | 'write-failed' | null。 */
+  let storageIssue = null;
 
   async function readRaw() {
+    const keys = [...Object.values(PART_KEYS), STORAGE_KEYS.legacyIncognitoState];
+    let result;
     try {
-      const result = await sessionArea.get(STORAGE_KEYS.incognitoState);
-      return result ? result[STORAGE_KEYS.incognitoState] : null;
+      result = (await sessionArea.get(keys)) || {};
     } catch (error) {
       throw new StorageFailureError(error);
     }
+    if (result[STORAGE_KEYS.legacyIncognitoState] !== undefined) {
+      // 旧版整份 key：扩展更新时 session 本应已清空，若仍残留则删除、不导入。
+      // 该 key 不会再被读取，删除失败只记录，不能因此阻断无痕功能；下次加载再试。
+      try {
+        await sessionArea.remove(STORAGE_KEYS.legacyIncognitoState);
+      } catch (error) {
+        logger.warn('undo-tab: 旧无痕状态删除失败，稍后重试');
+      }
+    }
+    const meta = result[PART_KEYS.meta];
+    return {
+      ...(meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {}),
+      recent: result[PART_KEYS.recent],
+      history: result[PART_KEYS.history],
+      liveTabs: result[PART_KEYS.liveTabs],
+    };
   }
 
-  async function persist() {
+  /** 写入指定部分以及之前写失败的部分。 */
+  async function persist(parts = ALL_PARTS) {
+    for (const part of parts) {
+      dirty.add(part);
+      partBytes.delete(part);
+    }
+    if (dirty.size === 0) return;
+    const items = {};
+    for (const part of dirty) items[PART_KEYS[part]] = serializePart(state, part);
     try {
-      await sessionArea.set({ [STORAGE_KEYS.incognitoState]: state });
-      needsSave = false;
+      await sessionArea.set(items);
+      dirty.clear();
+      storageIssue = null;
     } catch (error) {
-      needsSave = true;
+      storageIssue = isQuotaError(error) ? 'quota' : 'write-failed';
       throw new StorageFailureError(error);
     }
   }
 
   async function persistIfNeeded() {
-    if (needsSave) await persist();
+    if (dirty.size > 0) await persist([]);
+  }
+
+  function partSize(part) {
+    if (!partBytes.has(part)) partBytes.set(part, itemBytes(PART_KEYS[part], serializePart(state, part)));
+    return partBytes.get(part);
+  }
+
+  function quotaBytes() {
+    const quota = sessionArea.QUOTA_BYTES;
+    return Number.isFinite(quota) && quota > 0 ? quota : SESSION_QUOTA_BYTES;
   }
 
   async function load() {
@@ -298,7 +331,8 @@ export function createIncognitoSession({
     if (!loadPromise) {
       loadPromise = (async () => {
         state = normalizeIncognitoState(await readRaw());
-        needsSave = false;
+        dirty.clear();
+        partBytes.clear();
         if (state.needsClear) await finalizeClear();
         return state;
       })().catch((error) => {
@@ -315,7 +349,6 @@ export function createIncognitoSession({
       await persist();
     } catch (error) {
       state.needsClear = true;
-      needsSave = true;
       logger.warn('undo-tab: 无痕会话清理写入失败，稍后重试');
     }
   }
@@ -334,14 +367,13 @@ export function createIncognitoSession({
 
   async function endSessionInternal() {
     const previousSessionId = state.sessionId;
-    state = { ...emptyState(), needsClear: true, updatedAt: now() };
+    // 一次写入把全部 incognito.* key 覆盖为空的已结束状态。
+    state = { ...emptyState(), updatedAt: now() };
     try {
       await persist();
-      state = { ...emptyState(), updatedAt: now() };
-      await persist();
     } catch (error) {
-      state = { ...emptyState(), needsClear: true, updatedAt: now() };
-      needsSave = true;
+      // 内存中已是空的已结束状态；needsClear 与 dirty 保证下次写入或唤醒时继续清理。
+      state.needsClear = true;
       logger.warn('undo-tab: 无痕会话清理写入失败，稍后重试');
     }
     return { previousSessionId, active: false };
@@ -392,7 +424,7 @@ export function createIncognitoSession({
     if (ids.length !== state.windows.length || ids.some((id) => !state.windows.includes(id))) {
       state.windows = ids;
       state.updatedAt = now();
-      await persist();
+      await persist(['meta']);
     }
     return { active: true, sessionId: state.sessionId };
   }
@@ -401,8 +433,23 @@ export function createIncognitoSession({
     return state && state.status === ACTIVE && Boolean(state.sessionId);
   }
 
-  function addPending(stateRef, event) {
-    if (!stateRef.pending.some((item) => item.eventId === event.eventId)) stateRef.pending.push(event);
+  function addPending(event) {
+    if (!state.pending.some((item) => item.eventId === event.eventId)) state.pending.push(event);
+  }
+
+  /**
+   * 条目与 pending 在同一次 set 中写入，成功时已应用的事件无需进入 pending。
+   * 已应用的事件写入失败时记为 pending（弹窗据此提示未保存），dirty 保证后续重写。
+   * 重复/较旧事件没有改动数据，只重试之前写失败的部分，失败也不计入未保存。
+   * （会话或代次不符的事件在调用前已返回，这里只会是 applied / duplicate / older。）
+   */
+  async function persistEvent(event, result, part) {
+    try {
+      await persist(result.applied ? [part, 'meta'] : []);
+    } catch (error) {
+      if (result.applied) addPending(event);
+      throw error;
+    }
   }
 
   async function recordCloseInternal(rawEvent, maxRecords) {
@@ -425,14 +472,9 @@ export function createIncognitoSession({
       generation: Number.isInteger(event.generation) ? event.generation : state.clearGeneration.recent,
       urlKey: urlKey(event.url),
     };
-    addPending(state, closeEvent);
     const result = applyCloseEntry(state, closeEvent, uuid);
     if (result.applied) trimList(state.recent, maxRecords);
-    await persist();
-    if (result.applied || result.reason === 'duplicate' || result.reason === 'older' || result.reason === 'deleted') {
-      state.pending = state.pending.filter((item) => item.eventId !== closeEvent.eventId);
-      await persist();
-    }
+    await persistEvent(closeEvent, result, 'recent');
     return result;
   }
 
@@ -459,14 +501,9 @@ export function createIncognitoSession({
       order: Number.isFinite(event.order) ? event.order : now(),
     };
     if (state.appliedVisitEvents.includes(visitEvent.eventId)) return { applied: false, reason: 'duplicate' };
-    addPending(state, visitEvent);
     const result = applyVisitEntry(state, visitEvent, uuid);
     if (result.applied) trimList(state.history, maxRecords);
-    await persist();
-    if (result.applied || result.reason === 'duplicate' || result.reason === 'deleted') {
-      state.pending = state.pending.filter((item) => item.eventId !== visitEvent.eventId);
-      await persist();
-    }
+    await persistEvent(visitEvent, result, 'history');
     return result;
   }
 
@@ -481,24 +518,30 @@ export function createIncognitoSession({
         ? applyVisitEntry(state, event, uuid)
         : applyCloseEntry(state, event, uuid);
       if (result.applied) applied += 1;
-      else if (
-        result.reason === 'duplicate' ||
-        result.reason === 'older' ||
-        result.reason === 'deleted' ||
-        result.reason === 'stale-session' ||
-        result.reason === 'stale-generation' ||
-        result.reason === 'session-ended'
-      ) continue;
-      else remaining.push(event);
+      else if (!SETTLED_RETRY_REASONS.has(result.reason)) remaining.push(event);
     }
     if (applied > 0) {
+      // 补写的旧关闭可能已被较新关闭挤出列表，重新插入时位于顶部；
+      // 先按关闭时间排序再裁剪，避免旧条目置顶而较新的条目被裁掉。
+      state.recent.sort(compareClosedDesc);
       trimList(state.recent, limits.recentMaxRecords);
       trimList(state.history, limits.historyMaxRecords);
-      await persist();
     }
     state.pending = remaining;
-    await persist();
+    await persist(applied > 0 ? ALL_PARTS.filter((part) => part !== 'liveTabs') : ['meta']);
     return { applied, pending: remaining.length };
+  }
+
+  /** 按各集合当前平均条目大小，估算两个上限都存满时的总占用。 */
+  function estimateBytesInternal({ recentMaxRecords, historyMaxRecords }) {
+    const average = (part, list) => (list.length > 0 ? partSize(part) / list.length : ESTIMATED_ENTRY_BYTES);
+    const projectedBytes = Math.round(
+      average('recent', state.recent) * recentMaxRecords +
+        average('history', state.history) * historyMaxRecords +
+        partSize('meta') +
+        partSize('liveTabs'),
+    );
+    return { projectedBytes, quotaBytes: quotaBytes() };
   }
 
   return {
@@ -533,7 +576,7 @@ export function createIncognitoSession({
         if (!state.windows.includes(windowId)) {
           state.windows.push(windowId);
           state.updatedAt = now();
-          await persist();
+          await persist(['meta']);
         }
         return { active: true, sessionId: state.sessionId };
       });
@@ -572,8 +615,7 @@ export function createIncognitoSession({
         state.liveTabs = (Array.isArray(snapshots) ? snapshots : [])
           .map(normalizeSnapshot)
           .filter((snapshot) => snapshot && snapshot.sessionId === sessionId);
-        state.updatedAt = now();
-        await persist();
+        await persist(['liveTabs']);
       });
     },
 
@@ -617,10 +659,7 @@ export function createIncognitoSession({
             updated = true;
           }
         }
-        if (updated) {
-          state.updatedAt = now();
-          await persist();
-        }
+        if (updated) await persist(['history']);
         return { updated };
       });
     },
@@ -633,21 +672,14 @@ export function createIncognitoSession({
         }
         const source = view === 'history' ? state.history : state.recent;
         const needle = typeof queryText === 'string' ? queryText.trim().toLowerCase() : '';
-        const entries = needle
-          ? source.filter(
-              (entry) =>
-                entry.title.toLowerCase().includes(needle) || entry.url.toLowerCase().includes(needle),
-            )
-          : [...source];
+        const entries = needle ? source.filter((entry) => matchesQuery(entry, needle)) : [...source];
         return {
           active: true,
           sessionId: state.sessionId,
           entries,
           total: source.length,
           matchCount: entries.length,
-          topSignature: source[0]
-            ? `${source[0].lastEventId || source[0].id}:${source[0].lastVisitedAt || source[0].closedAt || ''}:${source[0].title || ''}`
-            : '',
+          topSignature: entrySignature(source[0]),
         };
       });
     },
@@ -665,19 +697,16 @@ export function createIncognitoSession({
       return enqueue(async () => {
         await load();
         if (!requireActive()) return { removed: false };
-        const source = view === 'history' ? state.history : state.recent;
-        const entry = source.find((item) => item.id === id);
+        const part = partForView(view);
+        const entry = state[part].find((item) => item.id === id);
         if (!entry) return { removed: false };
-        if (view === 'history') {
-          state.history = state.history.filter((item) => item.id !== id);
-          state.deletedHistory[entry.urlKey] = now();
-        } else {
-          state.recent = state.recent.filter((item) => item.id !== id);
-          state.deletedRecent[entry.urlKey] = now();
-        }
-        state.pending = state.pending.filter((item) => item.urlKey !== entry.urlKey);
+        state[part] = state[part].filter((item) => item.id !== id);
+        // 只取消同一集合的同 URL 旧 pending；另一集合的待补写不受影响。
+        // 条目与 pending 同一次写入，无需删除标记。
+        const kind = part === 'history' ? 'visit' : 'close';
+        state.pending = state.pending.filter((item) => item.kind !== kind || item.urlKey !== entry.urlKey);
         state.updatedAt = now();
-        await persist();
+        await persist([part, 'meta']);
         return { removed: true };
       });
     },
@@ -685,20 +714,14 @@ export function createIncognitoSession({
     clearView(view) {
       return enqueue(async () => {
         await load();
-        const target = view === 'history' ? 'history' : 'recent';
-        const removed = (target === 'history' ? state.history : state.recent).length;
-        state.clearGeneration[target] += 1;
-        if (target === 'history') {
-          state.history = [];
-          state.deletedHistory = {};
-        } else {
-          state.recent = [];
-          state.deletedRecent = {};
-        }
-        state.pending = state.pending.filter((item) => item.kind !== (target === 'history' ? 'visit' : 'close'));
-        if (target === 'history') state.appliedVisitEvents = [];
+        const part = partForView(view);
+        const removed = state[part].length;
+        state.clearGeneration[part] += 1;
+        state[part] = [];
+        state.pending = state.pending.filter((item) => item.kind !== (part === 'history' ? 'visit' : 'close'));
+        if (part === 'history') state.appliedVisitEvents = [];
         state.updatedAt = now();
-        await persist();
+        await persist([part, 'meta']);
         return { removed };
       });
     },
@@ -712,12 +735,10 @@ export function createIncognitoSession({
         state.clearGeneration.history += 1;
         state.recent = [];
         state.history = [];
-        state.deletedRecent = {};
-        state.deletedHistory = {};
         state.pending = [];
         state.appliedVisitEvents = [];
         state.updatedAt = now();
-        await persist();
+        await persist(['recent', 'history', 'meta']);
         return { removed };
       });
     },
@@ -737,13 +758,10 @@ export function createIncognitoSession({
     trimView(view, maxRecords) {
       return enqueue(async () => {
         await load();
-        const recent = view === 'recent' ? trimList(state.recent, maxRecords) : 0;
-        const history = view === 'history' ? trimList(state.history, maxRecords) : 0;
-        if (recent > 0 || history > 0) {
-          state.updatedAt = now();
-          await persist();
-        }
-        return { recent, history };
+        const part = partForView(view);
+        const removed = trimList(state[part], maxRecords);
+        if (removed > 0) await persist([part]);
+        return { recent: part === 'recent' ? removed : 0, history: part === 'history' ? removed : 0 };
       });
     },
 
@@ -752,6 +770,28 @@ export function createIncognitoSession({
         await load();
         return state.pending.length;
       });
+    },
+
+    /** 估算指定上限下的总占用，用于保存设置前提示可能超出配额。 */
+    estimateBytes(limits) {
+      return enqueue(async () => {
+        await load();
+        return estimateBytesInternal(limits);
+      });
+    },
+
+    /** 当前存储状态：最近一次写入问题与本次会话数据的估算占用。 */
+    getStorageStatus() {
+      return enqueue(async () => {
+        await load();
+        const bytesInUse = ALL_PARTS.reduce((sum, part) => sum + partSize(part), 0);
+        return { issue: storageIssue, bytesInUse, quotaBytes: quotaBytes() };
+      });
+    },
+
+    /** 不触发加载的轻量读取，供列表查询附带写入问题提示。 */
+    peekStorageIssue() {
+      return storageIssue;
     },
   };
 }

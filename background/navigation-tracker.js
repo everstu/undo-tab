@@ -1,9 +1,20 @@
+import { createOrderClock } from '../shared/time.js';
 import { isRestorableUrl, urlKey } from '../shared/urls.js';
 
 /**
  * 无痕访问采集：主框架提交、SPA pushState/replaceState、hash 变化。
  * 只处理 frameId === 0、http/https 且确认属于无痕标签的事件。
  */
+/** FNV-1a 32 位哈希，返回 base36 字符串。 */
+function hashString(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 export function createNavigationTracker({
   chromeApi,
   incognitoSession,
@@ -13,13 +24,7 @@ export function createNavigationTracker({
   logger = console,
 }) {
   if (!chromeApi || !incognitoSession) throw new Error('createNavigationTracker 缺少依赖');
-  let lastOrder = 0;
-
-  function nextOrder(timestamp) {
-    const base = Math.floor(timestamp * 1000);
-    lastOrder = base > lastOrder ? base : lastOrder + 1;
-    return lastOrder;
-  }
+  const nextOrder = createOrderClock();
 
   async function handle(details, capturedContext = null) {
     if (!details || details.frameId !== 0) return { recorded: false, reason: 'subframe' };
@@ -43,7 +48,8 @@ export function createNavigationTracker({
     const settings = await getSettings().catch(() => null);
     if (!settings) return { recorded: false, reason: 'storage-error' };
     const visitedAt = Number.isFinite(details.timeStamp) ? details.timeStamp : now();
-    const eventId = `nav:${details.tabId}:${details.documentId || ''}:${details.url}:${Math.round(visitedAt)}`;
+    // 事件 ID 只需在同一标签、文档、时间戳内区分网址，用短哈希代替完整网址以节省存储。
+    const eventId = `nav:${details.tabId}:${details.documentId || ''}:${hashString(details.url)}:${Math.round(visitedAt)}`;
     const currentTitle =
       tab.url === details.url && typeof tab.title === 'string' ? tab.title.trim() : '';
     const event = {

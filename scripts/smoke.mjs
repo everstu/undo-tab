@@ -250,6 +250,11 @@ function historyUrlRows(info) {
   return info.rows.filter((row) => row.url.startsWith('http://127.0.0.1:') || row.url.startsWith('https://'));
 }
 
+// 固定 profile 路径：上次中断遗留的数据会污染本次断言，启动前先清理（仅限 .tmp/ 下本脚本的目录）。
+if (path.dirname(path.resolve(profileDir)) === tempRoot) {
+  await rm(profileDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+}
+
 try {
   site = await startSite();
   site.add('/alpha', 'Alpha Page');
@@ -468,10 +473,15 @@ try {
   await group('D 分模式设置与裁剪', async () => {
     await must('D1 下调普通上限先确认，只裁剪普通最近关闭', async () => {
       await setView('recent');
+      // 上限最小为 10：先补到 12 条普通最近关闭，再下调到 10 触发裁剪确认。
+      for (let index = 1; index <= 8; index += 1) {
+        await closePage(await openPage(`/beta?n=${index}`));
+      }
+      await waitNormalEntries(12);
       await openSettings();
       await evaluatePopup(`(() => {
         const input = document.getElementById('max-records');
-        input.value = '2';
+        input.value = '10';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         document.getElementById('save-max-records').click();
       })()`);
@@ -500,24 +510,67 @@ try {
       await evaluatePopup("document.getElementById('trim-confirm-yes').click()");
       await waitFor(async () => {
         const entries = await normalEntries();
-        return entries.length === 2 ? entries : null;
-      }, { label: '普通记录裁剪到 2' });
+        return entries.length === 10 ? entries : null;
+      }, { label: '普通记录裁剪到 10' });
       const settings = (await storageLocal()).settings;
-      assertEqual(settings.normal.maxRecords, 2, '普通上限');
+      assertEqual(settings.normal.maxRecords, 10, '普通上限');
       assertEqual(settings.normal.historyMaxRecords, 200, '普通历史上限被改动');
       assertEqual(settings.incognito.recentMaxRecords, 100, '无痕最近关闭上限被改动');
       assertEqual(settings.incognito.historyMaxRecords, 100, '无痕历史上限被改动');
-      return '普通最近关闭 2 条，历史展示上限仍 200，无痕仍 100';
+      return '普通最近关闭 12→10 条，历史展示上限仍 200，无痕仍 100';
     });
 
-    await must('D2 宽度 360/800 保存立即生效，可恢复 440', async () => {
+    await must('D1b 越界上限按 10/1000 保存并提示', async () => {
+      const save = (value) => evaluatePopup(`(() => {
+        const input = document.getElementById('max-records');
+        input.value = '${value}';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('save-max-records').click();
+      })()`);
+      const status = () => evaluatePopup(`(() => {
+        const el = document.getElementById('max-records-status');
+        return el.hidden ? null : { text: el.textContent, notice: el.classList.contains('is-notice') };
+      })()`);
+      // 小于 10：已有 10 条，按 10 保存不删除记录，因此不弹删除确认。
+      await save(2);
+      const low = await waitFor(async () => {
+        const value = await status();
+        return value && /最小为 10/.test(value.text) ? value : null;
+      }, { label: '最小值提示' });
+      assertEqual(low.text, '记录条数最小为 10，已按 10 条保存', '最小值提示');
+      assertEqual(low.notice, true, '提示样式');
+      assertEqual(await evaluatePopup("document.getElementById('trim-confirm').hidden"), true, '不应出现删除确认');
+      assertEqual(await evaluatePopup("document.getElementById('max-records').value"), '10', '输入框显示实际保存值');
+      assertEqual((await storageLocal()).settings.normal.maxRecords, 10, '小于 10 写入 10');
+      // 大于 1000：上调不删除记录。
+      await save(5000);
+      await waitFor(async () => (await storageLocal()).settings.normal.maxRecords === 1000, { label: '大于 1000 写入 1000' });
+      const high = await waitFor(async () => {
+        const value = await status();
+        return value && /最大为 1000/.test(value.text) ? value : null;
+      }, { label: '最大值提示' });
+      assertEqual(high.text, '记录条数最大为 1000，已按 1000 条保存', '最大值提示');
+      assertEqual((await normalEntries()).length, 10, '上调不应删除记录');
+      // 恢复为 10，供后续步骤断言。
+      await save(10);
+      await waitFor(async () => (await storageLocal()).settings.normal.maxRecords === 10, { label: '恢复上限 10' });
+      return '2 → 10、5000 → 1000，均提示且未误删';
+    });
+
+    await must('D2 宽度 360/800 保存立即生效，越界收紧并提示，可恢复 440', async () => {
+      // 小于 360 按 360 保存并提示。
       await evaluatePopup(`(() => {
         const input = document.getElementById('popup-width');
-        input.value = '360';
+        input.value = '300';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         document.getElementById('save-popup-width').click();
       })()`);
-      await waitFor(async () => (await popupInfo()).width === '360px', { label: '宽度 360' });
+      await waitFor(async () => (await popupInfo()).width === '360px', { label: '宽度 300 → 360' });
+      assertEqual(
+        await evaluatePopup("document.getElementById('popup-width-status').textContent"),
+        '弹窗宽度最小为 360px，已按 360px 保存',
+        '宽度最小值提示',
+      );
       await backToList();
       await capturePopup('popup-360.png');
       await openSettings();
@@ -528,9 +581,19 @@ try {
         document.getElementById('save-popup-width').click();
       })()`);
       await waitFor(async () => (await popupInfo()).width === '800px', { label: '宽度 800' });
+      await evaluatePopup(`(() => {
+        const input = document.getElementById('popup-width');
+        input.value = '1200';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('save-popup-width').click();
+      })()`);
+      await waitFor(async () => /最大为 800px/.test(
+        await evaluatePopup("document.getElementById('popup-width-status').textContent"),
+      ), { label: '宽度最大值提示' });
+      assertEqual((await storageLocal()).settings.popupWidth, 800, '宽度大于 800 写入 800');
       await evaluatePopup("document.getElementById('reset-popup-width').click()");
       await waitFor(async () => (await popupInfo()).width === '440px', { label: '宽度恢复 440' });
-      return '360px → 800px → 440px';
+      return '300→360px（提示）→ 800px → 1200→800px（提示）→ 440px';
     });
 
     await must('D3 清空普通最近关闭不影响 Chrome 历史', async () => {
@@ -543,7 +606,7 @@ try {
       await backToList();
       await waitRows(0);
       const local = await storageLocal();
-      assertEqual(local.settings.normal.maxRecords, 2, '清空不应改设置');
+      assertEqual(local.settings.normal.maxRecords, 10, '清空不应改设置');
       await setView('history');
       const info = await waitFor(async () => {
         const current = await popupInfo();
@@ -562,7 +625,8 @@ try {
       assertEqual(panel.incognitoBlock, false, '普通窗口显示无痕设置');
       assert(/普通窗口/.test(panel.maxScope), '设置说明');
       const local = await storageLocal();
-      assertEqual(local['incognito.state'], undefined, 'local 出现无痕状态');
+      const incognitoKeys = Object.keys(local).filter((key) => key.startsWith('incognito.'));
+      assertEqual(incognitoKeys.length, 0, `local 出现无痕状态 ${incognitoKeys.join(',')}`);
       assertEqual(local['history.records'], undefined, '旧 key 未清理');
       await backToList();
       return '无痕设置已隐藏';
@@ -587,7 +651,7 @@ try {
       }, { label: '重启后记录' });
       assertEqual(info.rows[0].url, site.origin + '/gamma', '重启后记录网址');
       const settings = (await storageLocal()).settings;
-      assertEqual(settings.normal.maxRecords, 2, '重启后普通最近关闭上限');
+      assertEqual(settings.normal.maxRecords, 10, '重启后普通最近关闭上限');
       assertEqual(settings.normal.historyMaxRecords, 200, '重启后普通历史上限');
       return '1 条记录保留';
     });

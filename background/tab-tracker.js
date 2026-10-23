@@ -1,4 +1,5 @@
 import { MODES, STORAGE_KEYS } from '../shared/constants.js';
+import { createOrderClock } from '../shared/time.js';
 import { fallbackTitle, isRestorableUrl } from '../shared/urls.js';
 
 const SESSION_STALE_MS = 24 * 60 * 60 * 1000;
@@ -26,13 +27,7 @@ export function createTabTracker({
   const pendingRemovals = new Set();
   let initialized = false;
   let initPromise = null;
-  let lastOrder = 0;
-
-  function nextOrder(timestamp) {
-    const base = Math.floor(timestamp * 1000);
-    lastOrder = base > lastOrder ? base : lastOrder + 1;
-    return lastOrder;
-  }
+  const nextOrder = createOrderClock();
 
   function hasTabFavicon(tab) {
     return Boolean(tab && typeof tab.favIconUrl === 'string' && tab.favIconUrl !== '');
@@ -138,6 +133,24 @@ export function createTabTracker({
     } catch (error) {
       logger.warn('undo-tab: 无法保存无痕活动标签快照');
     }
+  }
+
+  function persistMode(mode) {
+    return mode === MODES.incognito ? persistIncognito() : persistNormal();
+  }
+
+  /** 关闭记录与恢复只依赖这些字段；只有 updatedAt 变化时不必整份重写存储。 */
+  function sameSnapshot(a, b) {
+    return (
+      a.url === b.url &&
+      a.title === b.title &&
+      a.hasFavicon === b.hasFavicon &&
+      a.index === b.index &&
+      a.windowId === b.windowId &&
+      a.pinned === b.pinned &&
+      a.mode === b.mode &&
+      a.sessionId === b.sessionId
+    );
   }
 
   async function persistAll() {
@@ -380,22 +393,22 @@ export function createTabTracker({
       });
     }
 
-    if (next.mode === MODES.incognito) await persistIncognito();
-    else await persistNormal();
+    if (!sameSnapshot(found.snapshot, next)) await persistMode(next.mode);
   }
 
-  async function handleTabMoved(tabId, moveInfo = {}, capturedContext = null) {
+  /** 移动/挂接/脱离：更新快照位置；无痕快照须仍属于本次会话窗口，否则丢弃。 */
+  async function relocateSnapshot(tabId, windowId, index, capturedContext) {
     await ensureReady();
     const found = findSnapshot(tabId);
     if (!found) return;
+    const targetWindowId = Number.isInteger(windowId) ? windowId : found.snapshot.windowId;
     if (found.mode === MODES.incognito) {
       const context = resolveContext(capturedContext);
-      const windowId = Number.isInteger(moveInfo.windowId) ? moveInfo.windowId : found.snapshot.windowId;
       if (
         !context ||
         !context.active ||
         found.snapshot.sessionId !== context.sessionId ||
-        !contextAllowsWindow(context, windowId)
+        !contextAllowsWindow(context, targetWindowId)
       ) {
         incognitoSnapshots.delete(tabId);
         await persistIncognito();
@@ -403,70 +416,22 @@ export function createTabTracker({
       }
     }
     const map = found.mode === MODES.incognito ? incognitoSnapshots : normalSnapshots;
-    const next = { ...found.snapshot, updatedAt: now() };
-    if (Number.isInteger(moveInfo.toIndex)) next.index = moveInfo.toIndex;
-    if (Number.isInteger(moveInfo.windowId)) next.windowId = moveInfo.windowId;
+    const next = { ...found.snapshot, windowId: targetWindowId, updatedAt: now() };
+    if (Number.isInteger(index)) next.index = index;
     map.set(tabId, next);
-    if (found.mode === MODES.incognito) await persistIncognito();
-    else await persistNormal();
+    await persistMode(found.mode);
   }
 
-  async function handleTabAttached(tabId, attachInfo = {}, capturedContext = null) {
-    await ensureReady();
-    const found = findSnapshot(tabId);
-    if (!found) return;
-    if (found.mode === MODES.incognito) {
-      const context = resolveContext(capturedContext);
-      const windowId = Number.isInteger(attachInfo.newWindowId)
-        ? attachInfo.newWindowId
-        : found.snapshot.windowId;
-      if (
-        !context ||
-        !context.active ||
-        found.snapshot.sessionId !== context.sessionId ||
-        !contextAllowsWindow(context, windowId)
-      ) {
-        incognitoSnapshots.delete(tabId);
-        await persistIncognito();
-        return;
-      }
-    }
-    const map = found.mode === MODES.incognito ? incognitoSnapshots : normalSnapshots;
-    const next = { ...found.snapshot, updatedAt: now() };
-    if (Number.isInteger(attachInfo.newWindowId)) next.windowId = attachInfo.newWindowId;
-    if (Number.isInteger(attachInfo.newPosition)) next.index = attachInfo.newPosition;
-    map.set(tabId, next);
-    if (found.mode === MODES.incognito) await persistIncognito();
-    else await persistNormal();
+  function handleTabMoved(tabId, moveInfo = {}, capturedContext = null) {
+    return relocateSnapshot(tabId, moveInfo.windowId, moveInfo.toIndex, capturedContext);
   }
 
-  async function handleTabDetached(tabId, detachInfo = {}, capturedContext = null) {
-    await ensureReady();
-    const found = findSnapshot(tabId);
-    if (!found) return;
-    if (found.mode === MODES.incognito) {
-      const context = resolveContext(capturedContext);
-      const windowId = Number.isInteger(detachInfo.oldWindowId)
-        ? detachInfo.oldWindowId
-        : found.snapshot.windowId;
-      if (
-        !context ||
-        !context.active ||
-        found.snapshot.sessionId !== context.sessionId ||
-        !contextAllowsWindow(context, windowId)
-      ) {
-        incognitoSnapshots.delete(tabId);
-        await persistIncognito();
-        return;
-      }
-    }
-    const map = found.mode === MODES.incognito ? incognitoSnapshots : normalSnapshots;
-    const next = { ...found.snapshot, updatedAt: now() };
-    if (Number.isInteger(detachInfo.oldWindowId)) next.windowId = detachInfo.oldWindowId;
-    if (Number.isInteger(detachInfo.oldPosition)) next.index = detachInfo.oldPosition;
-    map.set(tabId, next);
-    if (found.mode === MODES.incognito) await persistIncognito();
-    else await persistNormal();
+  function handleTabAttached(tabId, attachInfo = {}, capturedContext = null) {
+    return relocateSnapshot(tabId, attachInfo.newWindowId, attachInfo.newPosition, capturedContext);
+  }
+
+  function handleTabDetached(tabId, detachInfo = {}, capturedContext = null) {
+    return relocateSnapshot(tabId, detachInfo.oldWindowId, detachInfo.oldPosition, capturedContext);
   }
 
   async function handleTabReplaced(addedTabId, removedTabId, capturedContext = null) {
@@ -498,12 +463,12 @@ export function createTabTracker({
     await ensureReady();
     if (!Number.isInteger(tabId)) return { recorded: false, reason: 'invalid-tab' };
     const found = findSnapshot(tabId);
-    normalSnapshots.delete(tabId);
-    incognitoSnapshots.delete(tabId);
     pendingRemovals.delete(tabId);
-    await persistAll();
-
     if (!found) return { recorded: false, reason: 'no-snapshot' };
+    // 快照只会存在于一个数据域，只重写该域。
+    (found.mode === MODES.incognito ? incognitoSnapshots : normalSnapshots).delete(tabId);
+    await persistMode(found.mode);
+
     const snapshot = found.snapshot;
     if (!isRestorableUrl(snapshot.url)) return { recorded: false, reason: 'unsupported-url' };
 

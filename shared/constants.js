@@ -34,15 +34,22 @@ export const STORAGE_KEYS = Object.freeze({
   normalLiveTabs: 'normal.liveTabs',
   /** storage.session：普通待补写关闭事件 */
   normalPendingCloses: 'normal.pendingCloses',
-  /** storage.session：无痕会话状态（含最近关闭、访问历史、快照、待写事件） */
-  incognitoState: 'incognito.state',
+  /** storage.session：无痕会话元数据（sessionId、状态、窗口、代次、待写事件） */
+  incognitoMeta: 'incognito.meta',
+  /** storage.session：无痕最近关闭条目 */
+  incognitoRecent: 'incognito.recent',
+  /** storage.session：无痕访问历史条目 */
+  incognitoHistory: 'incognito.history',
+  /** storage.session：无痕活动标签快照 */
+  incognitoLiveTabs: 'incognito.liveTabs',
   // 旧版本 key，仅用于迁移与清理
+  legacyIncognitoState: 'incognito.state',
   legacyRecords: 'history.records',
   legacyLiveTabs: 'live.tabs',
 });
 
 export const LIMITS = Object.freeze({
-  maxRecords: Object.freeze({ min: 1, max: 10000 }),
+  maxRecords: Object.freeze({ min: 10, max: 1000 }),
   popupWidth: Object.freeze({ min: 360, max: 800 }),
 });
 
@@ -63,6 +70,15 @@ export const POPUP_MAX_HEIGHT = 580;
 
 /** 搜索词最大长度，避免异常长消息 */
 export const MAX_QUERY_LENGTH = 200;
+
+/** storage.session 配额（Chrome 112+ 为 10MB）；运行时优先读取 QUOTA_BYTES。 */
+export const SESSION_QUOTA_BYTES = 10 * 1024 * 1024;
+
+/** 预计占用超过配额的该比例时提示。 */
+export const QUOTA_WARN_RATIO = 0.9;
+
+/** 集合为空、无法求平均时，每条记录的估算字节数。 */
+export const ESTIMATED_ENTRY_BYTES = 600;
 
 /** 无痕访问事件去重窗口 */
 export const APPLIED_VISIT_EVENT_LIMIT = 200;

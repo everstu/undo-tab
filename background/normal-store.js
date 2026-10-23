@@ -1,6 +1,14 @@
 import { STORAGE_KEYS } from '../shared/constants.js';
 import { createQueue } from '../shared/queue.js';
-import { fallbackTitle, urlKey } from '../shared/urls.js';
+import { urlKey } from '../shared/urls.js';
+import {
+  applyRecentClose,
+  compareClosedDesc,
+  normalizeDeletedMarkers,
+  normalizeRecentEntry,
+  pruneDeletedMarkers,
+  serializeEntries,
+} from './recent-entries.js';
 
 export class StorageFailureError extends Error {
   constructor(cause) {
@@ -11,52 +19,21 @@ export class StorageFailureError extends Error {
   }
 }
 
-function compareEntriesDesc(a, b) {
-  if (b.closedAt !== a.closedAt) return b.closedAt - a.closedAt;
-  return (b.order || 0) - (a.order || 0);
-}
-
-function normalizeEntry(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const key = urlKey(raw.url);
-  if (!key) return null;
-  if (typeof raw.id !== 'string' || raw.id === '') return null;
-  if (!Number.isFinite(raw.closedAt)) return null;
-  return {
-    id: raw.id,
-    url: raw.url,
-    urlKey: key,
-    title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : fallbackTitle(raw.url),
-    closedAt: raw.closedAt,
-    order: Number.isFinite(raw.order) ? raw.order : raw.closedAt,
-    originalWindowId: Number.isInteger(raw.originalWindowId) ? raw.originalWindowId : -1,
-    originalIndex: Number.isInteger(raw.originalIndex) ? raw.originalIndex : 0,
-    wasPinned: raw.wasPinned === true,
-    hasFavicon: raw.hasFavicon === true,
-    windowClosing: raw.windowClosing === true,
-    lastEventId: typeof raw.lastEventId === 'string' ? raw.lastEventId : '',
-  };
-}
-
-function normalizeDeleted(raw) {
-  const result = {};
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
-  for (const [key, value] of Object.entries(raw)) {
-    if (urlKey(key) === key && Number.isFinite(value) && value >= 0) result[key] = value;
-  }
-  return result;
-}
-
 export function normalizeNormalState(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-  const entries = Array.isArray(source.entries) ? source.entries.map(normalizeEntry).filter(Boolean) : [];
-  entries.sort(compareEntriesDesc);
+  const entries = Array.isArray(source.entries) ? source.entries.map(normalizeRecentEntry).filter(Boolean) : [];
+  entries.sort(compareClosedDesc);
   return {
     generation: Number.isInteger(source.generation) && source.generation >= 0 ? source.generation : 0,
     lastOrder: Number.isFinite(source.lastOrder) ? source.lastOrder : 0,
-    deleted: normalizeDeleted(source.deleted),
+    deleted: normalizeDeletedMarkers(source.deleted),
     entries,
   };
+}
+
+/** 写入 local 的普通集合（条目省略可推导的 urlKey）。 */
+export function serializeNormalState(state) {
+  return { ...state, entries: serializeEntries(state.entries) };
 }
 
 export function normalizeCloseEvent(raw) {
@@ -88,75 +65,18 @@ function normalizePending(raw) {
 
 function trimEntries(state, maxRecords) {
   const limit = Number.isInteger(maxRecords) && maxRecords > 0 ? maxRecords : 0;
-  state.entries.sort(compareEntriesDesc);
+  state.entries.sort(compareClosedDesc);
   const removed = Math.max(0, state.entries.length - limit);
   if (removed > 0) state.entries = state.entries.slice(0, limit);
   return removed;
 }
 
-/**
- * 把一次关闭事件应用到普通最近关闭集合。
- * - 相同 urlKey 更新并置顶，不增加第二条；
- * - 同一 eventId 幂等；
- * - 较旧事件晚到时忽略，不覆盖较新的数据；
- * - 清空后旧代次事件丢弃。
- */
+/** 普通最近关闭只校验清空代次；去重、置顶与删除标记规则见 applyRecentClose。 */
 function applyCloseEvent(state, event, uuid) {
   if (event.generation !== state.generation) return { applied: false, reason: 'stale' };
-  const deletedAt = state.deleted[event.urlKey];
-  if (Number.isFinite(deletedAt)) {
-    // 删除之前的关闭事件（包括清理 pending 失败后补写的事件）必须失效；
-    // 删除之后真正发生的新关闭仍可重新生成条目。
-    if (event.closedAt <= deletedAt) return { applied: false, reason: 'deleted' };
-    delete state.deleted[event.urlKey];
-  }
-  const index = state.entries.findIndex((entry) => entry.urlKey === event.urlKey);
-  if (index >= 0) {
-    const existing = state.entries[index];
-    if (existing.lastEventId && existing.lastEventId === event.eventId) {
-      return { applied: false, reason: 'duplicate', entryId: existing.id };
-    }
-    if (
-      event.closedAt < existing.closedAt ||
-      (event.closedAt === existing.closedAt && event.order <= existing.order)
-    ) {
-      return { applied: false, reason: 'older', entryId: existing.id };
-    }
-    const updated = {
-      ...existing,
-      title: event.title || existing.title || fallbackTitle(event.url),
-      closedAt: event.closedAt,
-      order: event.order,
-      originalWindowId: event.originalWindowId,
-      originalIndex: event.originalIndex,
-      wasPinned: event.wasPinned,
-      hasFavicon: event.hasFavicon,
-      windowClosing: event.windowClosing,
-      lastEventId: event.eventId,
-    };
-    state.entries.splice(index, 1);
-    state.entries.unshift(updated);
-    state.lastOrder = Math.max(state.lastOrder || 0, event.order);
-    return { applied: true, entryId: updated.id };
-  }
-
-  const entry = {
-    id: uuid(),
-    url: event.url,
-    urlKey: event.urlKey,
-    title: event.title || fallbackTitle(event.url),
-    closedAt: event.closedAt,
-    order: event.order,
-    originalWindowId: event.originalWindowId,
-    originalIndex: event.originalIndex,
-    wasPinned: event.wasPinned,
-    hasFavicon: event.hasFavicon,
-    windowClosing: event.windowClosing,
-    lastEventId: event.eventId,
-  };
-  state.entries.unshift(entry);
-  state.lastOrder = Math.max(state.lastOrder || 0, event.order);
-  return { applied: true, entryId: entry.id };
+  const result = applyRecentClose(state.entries, event, uuid, state.deleted);
+  if (result.applied) state.lastOrder = Math.max(state.lastOrder || 0, event.order);
+  return result;
 }
 
 export function createNormalStore({
@@ -203,7 +123,7 @@ export function createNormalStore({
   }
 
   const readState = async () => normalizeNormalState(await readLocal(STORAGE_KEYS.normalRecent, null));
-  const writeState = (state) => writeLocal({ [STORAGE_KEYS.normalRecent]: state });
+  const writeState = (state) => writeLocal({ [STORAGE_KEYS.normalRecent]: serializeNormalState(state) });
   const readPending = async () => normalizePending(await readSession(STORAGE_KEYS.normalPendingCloses, []));
   const writePending = (list) => writeSession({ [STORAGE_KEYS.normalPendingCloses]: list });
 
@@ -260,7 +180,8 @@ export function createNormalStore({
           result.reason === 'deleted'
         ) {
           try {
-            await writePending((await readPending()).filter((item) => item.eventId !== event.eventId));
+            // 队列内 pending 只由本 store 修改，沿用上面读到的列表即可。
+            await writePending(pending.filter((item) => item.eventId !== event.eventId));
           } catch (error) {
             // 补写成功但清理 pending 失败时，下次会按 eventId / 删除标记幂等。
           }
@@ -294,6 +215,10 @@ export function createNormalStore({
           await writeState(state);
         }
         await writePending(remaining);
+        // pending 已落盘，此后才能安全移除不再挡住任何事件的删除标记。
+        if (pruneDeletedMarkers(state.deleted, remaining) > 0) {
+          await writeState(state).catch(() => {});
+        }
         return { applied, pending: remaining.length, trimmed };
       });
     },
@@ -309,20 +234,57 @@ export function createNormalStore({
         const entry = state.entries.find((item) => item.id === id);
         if (!entry) return { removed: false, total: state.entries.length };
         state.entries = state.entries.filter((item) => item.id !== id);
-        // 与条目删除同一次 local 写入持久化删除标记；即使随后的 session pending
+
+        let pending = null;
+        try {
+          pending = await readPending();
+        } catch (error) {
+          pending = null; // 无法确认是否有旧事件，按“有”处理。
+        }
+        const hasBlocking = !pending || pending.some((item) => item.urlKey === entry.urlKey);
+        if (!hasBlocking) {
+          // 没有同 URL 的待补写：无需删除标记，顺带移除其他已无作用的标记。
+          pruneDeletedMarkers(state.deleted, pending);
+          await writeState(state);
+          return { removed: true, total: state.entries.length };
+        }
+
+        // 有旧事件：删除标记与条目删除同一次 local 写入；即使随后的 session pending
         // 清理失败，旧事件补写时也会被删除标记挡住。
         state.deleted[entry.urlKey] = now();
         await writeState(state);
-        const pending = await readPending();
-        const nextPending = pending.filter((item) => item.urlKey !== entry.urlKey);
-        if (nextPending.length !== pending.length) {
-          try {
-            await writePending(nextPending);
-          } catch (error) {
-            // 删除标记已持久化，补写不会复活。
-          }
+        try {
+          const nextPending = pending.filter((item) => item.urlKey !== entry.urlKey);
+          await writePending(nextPending);
+          // pending 已取消，标记不再需要；移除失败时留待补写或下次启动清理。
+          if (pruneDeletedMarkers(state.deleted, nextPending) > 0) await writeState(state);
+        } catch (error) {
+          // 删除标记已持久化，补写不会复活。
         }
         return { removed: true, total: state.entries.length };
+      });
+    },
+
+    /**
+     * worker 初始化维护，合并为一次读写：
+     * - 按当前上限裁剪（如升级后上限收紧到 1000，超出的最旧记录立即删除）；
+     * - 清理已无作用的删除标记：浏览器重启后 session 中的 pending 已不存在，
+     *   只保留仍挡住某个待补写事件的标记。pending 读取失败时跳过清理，仍完成裁剪。
+     */
+    startupMaintenance(maxRecords) {
+      return enqueue(async () => {
+        const state = await readState();
+        const trimmed = trimEntries(state, maxRecords);
+        let prunedMarkers = 0;
+        if (Object.keys(state.deleted).length > 0) {
+          try {
+            prunedMarkers = pruneDeletedMarkers(state.deleted, await readPending());
+          } catch (error) {
+            prunedMarkers = 0;
+          }
+        }
+        if (trimmed > 0 || prunedMarkers > 0) await writeState(state);
+        return { trimmed, prunedMarkers };
       });
     },
 
@@ -349,7 +311,10 @@ export function createNormalStore({
       return enqueue(async () => {
         const state = await readState();
         const trimmed = trimEntries(state, maxRecords);
-        await writeLocal({ [STORAGE_KEYS.settings]: settings, [STORAGE_KEYS.normalRecent]: state });
+        await writeLocal({
+          [STORAGE_KEYS.settings]: settings,
+          [STORAGE_KEYS.normalRecent]: serializeNormalState(state),
+        });
         return { settings, trimmed, total: state.entries.length };
       });
     },

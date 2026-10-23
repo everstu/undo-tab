@@ -4,15 +4,18 @@ import {
   MODES,
   MESSAGES,
   PAGE_SIZE,
+  STORAGE_KEYS,
   VIEWS,
 } from '../shared/constants.js';
 import {
+  describeClampNotice,
   describeFieldError,
   modeMaxRecords,
   normalizeSettings,
   validateMaxRecords,
   validatePopupWidth,
 } from '../shared/settings.js';
+import { entrySignature } from '../shared/entries.js';
 import { formatRelativeTime } from '../shared/time.js';
 import { initialForRecord, recordTitle } from '../shared/urls.js';
 import {
@@ -26,6 +29,8 @@ import {
   maxLabel,
   maxScopeText,
   paginate,
+  quotaWarningText,
+  storageUsageText,
   trimConfirmText,
 } from './state.js';
 
@@ -69,6 +74,7 @@ const ui = {
   resetPopupWidth: document.getElementById('reset-popup-width'),
   incognitoBlock: document.getElementById('incognito-block'),
   incognitoStatus: document.getElementById('incognito-status'),
+  incognitoUsage: document.getElementById('incognito-usage'),
   clearIncognitoData: document.getElementById('clear-incognito-data'),
   clearIncognitoConfirm: document.getElementById('clear-incognito-confirm'),
   clearIncognitoYes: document.getElementById('clear-incognito-yes'),
@@ -107,6 +113,8 @@ const state = {
   sessionActive: false,
   topSignature: '',
   pendingCloseCount: 0,
+  storage: null,
+  storageIssue: null,
   incognitoAllowed: null,
   loading: true,
   loadError: '',
@@ -120,7 +128,7 @@ const state = {
   feedbackTimers: new Map(),
   pendingMax: null,
   limitRequestSeq: 0,
-  statusTimer: null,
+  statusTimers: new Map(),
 };
 
 function sendMessage(type, payload = {}) {
@@ -157,6 +165,8 @@ function applyContext(data) {
   state.sessionId = typeof session.sessionId === 'string' ? session.sessionId : null;
   state.sessionActive = session.active === true;
   state.pendingCloseCount = Number.isInteger(data.pendingCloseCount) ? data.pendingCloseCount : 0;
+  state.storage = data.storage && typeof data.storage === 'object' ? data.storage : null;
+  state.storageIssue = state.storage ? state.storage.issue || null : null;
   state.contextResolved = true;
   state.contextError = false;
 }
@@ -174,6 +184,7 @@ function applyView(data) {
   state.pendingCloseCount = Number.isInteger(data.pendingCloseCount)
     ? data.pendingCloseCount
     : state.pendingCloseCount;
+  if (Object.prototype.hasOwnProperty.call(data, 'storageIssue')) state.storageIssue = data.storageIssue || null;
 }
 
 async function getWindowContext() {
@@ -467,6 +478,12 @@ function currentBanner() {
   if (state.mode === MODES.incognito && !state.sessionActive) {
     return { tone: 'info', text: '本次无痕会话已结束，记录已清空' };
   }
+  if (state.mode === MODES.incognito && state.storageIssue === 'quota') {
+    return {
+      tone: 'error',
+      text: '无痕临时存储空间已满，新记录暂存在内存中，扩展休眠后可能丢失。可在设置中下调上限或清空本次记录。',
+    };
+  }
   if (state.pendingCloseCount > 0) {
     return {
       tone: 'error',
@@ -597,6 +614,9 @@ function syncSettingsFields({ force = false } = {}) {
     ? '本次无痕会话有效；关闭最后一个无痕窗口后，最近关闭与访问历史会自动清空。'
     : '本次无痕会话已结束，没有可读取的无痕记录。';
   ui.clearIncognitoData.disabled = !state.sessionActive;
+  const showUsage = state.mode === MODES.incognito && state.sessionActive && state.storage !== null;
+  ui.incognitoUsage.hidden = !showUsage;
+  ui.incognitoUsage.textContent = showUsage ? storageUsageText(state.storage) : '';
 }
 
 function syncSettingsSections() {
@@ -617,19 +637,27 @@ function syncSettingsSections() {
   ui.manageHistoryBlock.hidden = state.mode !== MODES.normal || state.view !== VIEWS.history;
 }
 
-function showStatus(element, text) {
-  window.clearTimeout(state.statusTimer);
+/** notice 用于“越界输入已按边界值保存”，以提醒色显示并停留更久。 */
+function showStatus(element, text, { notice = false } = {}) {
+  // 每个状态元素独立计时，避免后一个提示取消前一个的自动隐藏。
+  window.clearTimeout(state.statusTimers.get(element));
   element.textContent = text;
+  element.classList.toggle('is-notice', notice);
   element.hidden = false;
-  state.statusTimer = window.setTimeout(() => {
+  state.statusTimers.set(element, window.setTimeout(() => {
+    state.statusTimers.delete(element);
     element.hidden = true;
     element.textContent = '';
-  }, 3200);
+    element.classList.remove('is-notice');
+  }, notice ? 6000 : 3200));
 }
 
 function clearStatus(element) {
+  window.clearTimeout(state.statusTimers.get(element));
+  state.statusTimers.delete(element);
   element.hidden = true;
   element.textContent = '';
+  element.classList.remove('is-notice');
 }
 
 function showFieldError(element, input, text) {
@@ -656,11 +684,15 @@ async function saveMaxRecords(view = VIEWS.recent) {
   state.pendingMax = null;
   ui.trimConfirm.hidden = true;
   clearFieldError(controls.error, controls.input);
+  clearStatus(controls.status);
   const validation = validateMaxRecords(controls.input.value);
   if (!validation.ok) {
     showFieldError(controls.error, controls.input, describeFieldError(`${state.mode}.maxRecords`, validation.reason));
     return;
   }
+  // 越界整数收紧到 10/1000：输入框显示实际将保存的值，保存后提示。
+  const clamped = validation.clamped || null;
+  if (clamped) controls.input.value = String(validation.value);
   const previewResponse = await sendMessage(MESSAGES.getTrimPreview, {
     windowId: state.windowId,
     view,
@@ -672,22 +704,29 @@ async function saveMaxRecords(view = VIEWS.recent) {
     return;
   }
   const preview = previewResponse.data;
-  if (preview.recent > 0 || preview.history > 0) {
-    state.pendingMax = { view, value: validation.value };
-    ui.trimConfirmText.textContent = trimConfirmText({
-      mode: state.mode,
-      view,
-      recent: preview.recent,
-      history: preview.history,
-      limit: validation.value,
-    });
+  const trimming = preview.recent > 0 || preview.history > 0;
+  if (trimming || preview.quotaWarning) {
+    state.pendingMax = { view, value: validation.value, clamped };
+    const parts = [];
+    if (clamped) parts.push(`${describeClampNotice('maxRecords', clamped, { pending: true })}。`);
+    if (trimming) {
+      parts.push(trimConfirmText({
+        mode: state.mode,
+        view,
+        recent: preview.recent,
+        history: preview.history,
+        limit: validation.value,
+      }));
+    }
+    if (preview.quotaWarning) parts.push(quotaWarningText(preview.quotaWarning));
+    ui.trimConfirmText.textContent = parts.join(' ');
     ui.trimConfirm.hidden = false;
     return;
   }
-  await commitMaxRecords(validation.value, view);
+  await commitMaxRecords(validation.value, view, clamped);
 }
 
-async function commitMaxRecords(value, view) {
+async function commitMaxRecords(value, view, clamped = null) {
   const controls = limitControls(view);
   ui.trimConfirm.hidden = true;
   state.pendingMax = null;
@@ -705,18 +744,27 @@ async function commitMaxRecords(value, view) {
   const parts = [];
   if (trimmed.recent > 0) parts.push(`最近关闭 ${trimmed.recent} 条`);
   if (trimmed.history > 0) parts.push(`访问历史 ${trimmed.history} 条`);
-  showStatus(controls.status, parts.length > 0 ? `已保存，删除了${parts.join('、')}` : '已保存');
+  const removedText = parts.length > 0 ? `删除了${parts.join('、')}` : '';
+  if (clamped) {
+    const notice = describeClampNotice('maxRecords', clamped);
+    showStatus(controls.status, removedText ? `${notice}，${removedText}` : notice, { notice: true });
+  } else {
+    showStatus(controls.status, removedText ? `已保存，${removedText}` : '已保存');
+  }
   await loadContext();
   await loadView();
 }
 
 async function savePopupWidth() {
   clearFieldError(ui.popupWidthError, ui.popupWidth);
+  clearStatus(ui.popupWidthStatus);
   const validation = validatePopupWidth(ui.popupWidth.value);
   if (!validation.ok) {
     showFieldError(ui.popupWidthError, ui.popupWidth, describeFieldError('popupWidth', validation.reason));
     return;
   }
+  // 越界整数收紧到 360/800 后保存并提示。
+  if (validation.clamped) ui.popupWidth.value = String(validation.value);
   const response = await sendMessage(MESSAGES.updateSettings, {
     windowId: state.windowId,
     patch: { popupWidth: validation.value },
@@ -727,7 +775,11 @@ async function savePopupWidth() {
   }
   applySettings(response.data.settings);
   ui.popupWidth.value = String(state.settings.popupWidth);
-  showStatus(ui.popupWidthStatus, `已保存 ${state.settings.popupWidth}px`);
+  if (validation.clamped) {
+    showStatus(ui.popupWidthStatus, describeClampNotice('popupWidth', validation.clamped), { notice: true });
+  } else {
+    showStatus(ui.popupWidthStatus, `已保存 ${state.settings.popupWidth}px`);
+  }
   render();
 }
 
@@ -920,8 +972,8 @@ ui.saveMaxRecords.addEventListener('click', () => void saveMaxRecords());
 ui.saveHistoryMaxRecords.addEventListener('click', () => void saveMaxRecords(VIEWS.history));
 ui.trimConfirmYes.addEventListener('click', () => {
   if (state.pendingMax === null) return;
-  const { value, view } = state.pendingMax;
-  void commitMaxRecords(value, view);
+  const { value, view, clamped } = state.pendingMax;
+  void commitMaxRecords(value, view, clamped);
 });
 ui.trimConfirmNo.addEventListener('click', () => {
   const view = state.pendingMax?.view || VIEWS.recent;
@@ -973,27 +1025,26 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
       applySettings(changes.settings.newValue);
       scheduleRefresh();
     }
-    if (Object.prototype.hasOwnProperty.call(changes, 'normal.recent') && state.mode === MODES.normal) {
+    if (Object.prototype.hasOwnProperty.call(changes, STORAGE_KEYS.normalRecent) && state.mode === MODES.normal) {
       scheduleRefresh();
     }
     return;
   }
-  if (areaName !== 'session') return;
-  if (!Object.prototype.hasOwnProperty.call(changes, 'incognito.state')) return;
-  if (state.mode !== MODES.incognito) return;
-  const next = changes['incognito.state'].newValue;
-  if (!next || next.status !== 'active' || next.sessionId !== state.sessionId) {
-    scheduleRefresh();
-    return;
+  if (areaName !== 'session' || state.mode !== MODES.incognito) return;
+  const metaChange = changes[STORAGE_KEYS.incognitoMeta];
+  if (metaChange) {
+    const meta = metaChange.newValue;
+    if (!meta || meta.status !== 'active' || meta.sessionId !== state.sessionId) {
+      scheduleRefresh();
+      return;
+    }
   }
-  const length = state.view === VIEWS.history
-    ? (Array.isArray(next.history) ? next.history.length : 0)
-    : (Array.isArray(next.recent) ? next.recent.length : 0);
-  const list = state.view === VIEWS.history ? next.history : next.recent;
-  const top = Array.isArray(list) && list[0] ? list[0] : null;
-  const signature = top
-    ? `${top.lastEventId || top.id}:${top.lastVisitedAt || top.closedAt || ''}:${top.title || ''}`
-    : '';
+  const listKey = state.view === VIEWS.history ? STORAGE_KEYS.incognitoHistory : STORAGE_KEYS.incognitoRecent;
+  if (!Object.prototype.hasOwnProperty.call(changes, listKey)) return;
+  const raw = changes[listKey].newValue;
+  const list = Array.isArray(raw) ? raw : [];
+  const length = list.length;
+  const signature = entrySignature(list[0]);
   if (length !== state.total || signature !== state.topSignature) scheduleRefresh();
 });
 

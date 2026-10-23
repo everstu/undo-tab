@@ -8,6 +8,7 @@
   --accent: #1a73e8;
   --danger: #c5221f;
   --success: #188038;
+  --warning: #b06000;
   --chip-bg: #f1f3f4;
 }
 
@@ -637,6 +638,11 @@ body.booting {
 .status-text {
   font-size: 11px;
   color: var(--success);
+}
+
+/* 越界输入已按边界值保存的提示 */
+.status-text.is-notice {
+  color: var(--warning);
 }
 
 .field-actions {

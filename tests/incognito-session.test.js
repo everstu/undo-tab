@@ -213,7 +213,7 @@ test('清空本次记录保留有效会话，并丢弃旧 pending', async () => 
   const stale = await session.recordVisit(visitEvent('v1', 'https://example.com/a', 1000), 500);
   assert.equal(stale.applied, true);
   assert.equal((await session.query('history', '')).total, 1);
-  assert.ok(chrome.storage.session.data['incognito.state'].sessionId === info.sessionId);
+  assert.ok(chrome.storage.session.data['incognito.meta'].sessionId === info.sessionId);
 });
 
 test('单独清空访问历史不影响最近关闭及其上限', async () => {
@@ -263,28 +263,27 @@ test('写入失败保留 pending，恢复后补写', async () => {
   assert.equal((await session.query('history', '')).total, 1);
 });
 
-test('单删访问历史后旧 pending 不复活，新访问仍可写入', async () => {
+test('单删访问历史与取消旧 pending 原子保存，旧 pending 不复活，新访问仍可写入', async () => {
   const { session, chrome } = setup();
   await session.syncWindows([1]);
-  await session.recordVisit(visitEvent('v1', 'https://example.com/a', 1000), 500);
+  // 写入失败：条目只在内存，并作为 pending 保留。
+  chrome.storage.session.control.failWrites = true;
+  await assert.rejects(
+    () => session.recordVisit(visitEvent('v1', 'https://example.com/a', 1000), 500),
+    StorageFailureError,
+  );
+  chrome.storage.session.control.failWrites = false;
   const entry = (await session.query('history', '')).entries[0];
   await session.deleteEntry('history', entry.id);
   assert.equal((await session.query('history', '')).total, 0);
 
-  const info = await session.getInfo();
-  const state = chrome.storage.session.data['incognito.state'];
-  state.pending.push({
-    kind: 'visit',
-    eventId: 'late-old',
-    sessionId: info.sessionId,
-    generation: state.clearGeneration.history,
-    url: 'https://example.com/a',
-    urlKey: 'https://example.com/a',
-    title: 'A',
-    visitedAt: 1000,
-    order: 1000000,
-  });
-  // 模拟 worker 重建：新实例从 session 读取删除标记与 pending。
+  // 删除与取消 pending 同一次写入落盘，不需要也不保存删除标记。
+  const meta = chrome.storage.session.data['incognito.meta'];
+  assert.equal(meta.pending.length, 0);
+  assert.deepEqual(chrome.storage.session.data['incognito.history'], []);
+  assert.equal('deletedHistory' in meta, false);
+
+  // 模拟 worker 重建：新实例从 session 读取，补写不会复活已删除记录。
   const rebuilt = createIncognitoSession({
     sessionArea: chrome.storage.session,
     logger: { warn() {} },
@@ -309,4 +308,185 @@ test('活动快照只保存当前会话', async () => {
   const tabs = await session.getLiveTabs();
   assert.equal(tabs.length, 1);
   assert.equal(tabs[0].sessionId, first.sessionId);
+});
+
+test('单删访问历史只取消同集合的 pending，同 URL 的最近关闭待补写保留', async () => {
+  const { session, chrome } = setup();
+  await session.syncWindows([1]);
+  await session.recordVisit(visitEvent('v1', 'https://example.com/a', 1000), 500);
+  chrome.storage.session.control.failWrites = true;
+  await assert.rejects(
+    () => session.recordClose(closeEvent('c1', 'https://example.com/a', 2000), 500),
+    StorageFailureError,
+  );
+  chrome.storage.session.control.failWrites = false;
+  assert.equal(await session.getPendingCount(), 1);
+
+  const entry = (await session.query('history', '')).entries[0];
+  await session.deleteEntry('history', entry.id);
+  assert.equal(await session.getPendingCount(), 1);
+
+  const result = await session.retryPending({ recentMaxRecords: 500, historyMaxRecords: 500 });
+  assert.equal(result.pending, 0);
+  const recent = await session.query('recent', '');
+  assert.equal(recent.total, 1);
+  assert.equal(recent.entries[0].url, 'https://example.com/a');
+  assert.equal((await session.query('history', '')).total, 0);
+});
+
+test('一次关闭事件成功时只写一次 session 存储', async () => {
+  const { session, chrome } = setup();
+  await session.syncWindows([1]);
+  const writes = chrome.storage.session.control.writes;
+  await session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500);
+  assert.equal(chrome.storage.session.control.writes, writes + 1);
+  assert.equal(await session.getPendingCount(), 0);
+  assert.equal(chrome.storage.session.data['incognito.meta'].pending.length, 0);
+});
+
+function captureSetKeys(chrome) {
+  const calls = [];
+  const original = chrome.storage.session.set.bind(chrome.storage.session);
+  chrome.storage.session.set = async (items) => {
+    calls.push(Object.keys(items).sort());
+    return original(items);
+  };
+  return calls;
+}
+
+test('拆分存储：每次只写变动的 key，相关部分同一次写入', async () => {
+  const { session, chrome } = setup();
+  const started = await session.syncWindows([1]);
+  const calls = captureSetKeys(chrome);
+
+  await session.setLiveTabs([
+    { captureId: 'a', tabId: 1, windowId: 1, sessionId: started.sessionId, url: 'https://example.com/a' },
+  ]);
+  await session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500);
+  await session.recordVisit(visitEvent('v1', 'https://example.com/b', 1000, { tabId: 1 }), 500);
+  await session.updateTitle({ url: 'https://example.com/b', title: '新标题', tabId: 1 });
+  const entry = (await session.query('history', '')).entries[0];
+  await session.deleteEntry('history', entry.id);
+
+  assert.deepEqual(calls, [
+    ['incognito.liveTabs'],
+    ['incognito.meta', 'incognito.recent'],
+    ['incognito.history', 'incognito.meta'],
+    ['incognito.history'],
+    ['incognito.history', 'incognito.meta'],
+  ]);
+  // 条目写入时省略可推导的 urlKey，读取时恢复。
+  assert.equal('urlKey' in chrome.storage.session.data['incognito.recent'][0], false);
+  const rebuilt = createIncognitoSession({ sessionArea: chrome.storage.session, logger: { warn() {} } });
+  assert.equal((await rebuilt.query('recent', '')).entries[0].urlKey, 'https://example.com/a');
+});
+
+test('最后一个窗口关闭时一次写入清空全部无痕 key', async () => {
+  const { session, chrome } = setup();
+  const started = await session.syncWindows([1]);
+  await session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500);
+  await session.recordVisit(visitEvent('v1', 'https://example.com/b', 1000), 500);
+  await session.setLiveTabs([
+    { captureId: 'a', tabId: 1, windowId: 1, sessionId: started.sessionId, url: 'https://example.com/a' },
+  ]);
+  await session.syncWindows([]);
+  const data = chrome.storage.session.data;
+  assert.deepEqual(data['incognito.recent'], []);
+  assert.deepEqual(data['incognito.history'], []);
+  assert.deepEqual(data['incognito.liveTabs'], []);
+  assert.equal(data['incognito.meta'].status, 'ended');
+  assert.equal(data['incognito.meta'].needsClear, false);
+  assert.equal(JSON.stringify(data).includes('example.com'), false);
+});
+
+test('旧版整份 incognito.state 残留时直接删除，不导入', async () => {
+  const { session, chrome } = setup();
+  chrome.storage.session.data['incognito.state'] = {
+    sessionId: 'legacy',
+    status: 'active',
+    windows: [1],
+    recent: [{ id: 'r1', url: 'https://example.com/legacy', closedAt: 1000 }],
+  };
+  const info = await session.getInfo();
+  assert.equal(info.active, false);
+  assert.equal('incognito.state' in chrome.storage.session.data, false);
+});
+
+test('配额写满时标记 quota 问题并保留内存数据；写入恢复后清除', async () => {
+  const { session, chrome } = setup();
+  await session.syncWindows([1]);
+  chrome.storage.session.control.failWrites = true; // mock 抛出 QUOTA_BYTES quota exceeded
+  await assert.rejects(
+    () => session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500),
+    StorageFailureError,
+  );
+  assert.equal(session.peekStorageIssue(), 'quota');
+  assert.equal((await session.getStorageStatus()).issue, 'quota');
+  assert.equal((await session.query('recent', '')).total, 1);
+
+  chrome.storage.session.control.failWrites = false;
+  await session.retryPending({ recentMaxRecords: 500, historyMaxRecords: 500 });
+  assert.equal(session.peekStorageIssue(), null);
+  assert.equal(chrome.storage.session.data['incognito.recent'].length, 1);
+});
+
+test('按当前平均条目大小估算两个上限存满时的占用', async () => {
+  const { session } = setup();
+  await session.syncWindows([1]);
+  const empty = await session.estimateBytes({ recentMaxRecords: 100, historyMaxRecords: 100 });
+  assert.equal(empty.quotaBytes, 10 * 1024 * 1024);
+  assert.ok(empty.projectedBytes >= 600 * 200);
+
+  for (let i = 0; i < 4; i += 1) {
+    await session.recordClose(closeEvent(`c${i}`, `https://example.com/${'x'.repeat(400)}/${i}`, 1000 + i), 500);
+  }
+  const status = await session.getStorageStatus();
+  assert.ok(status.bytesInUse > 4 * 400);
+  const projected = await session.estimateBytes({ recentMaxRecords: 1000, historyMaxRecords: 10 });
+  assert.ok(projected.projectedBytes > 1000 * 400);
+});
+
+test('补写被挤出列表的旧关闭时按时间排序再裁剪，不会置顶旧条目或裁掉较新条目', async () => {
+  const { session, chrome } = setup();
+  await session.syncWindows([1]);
+  chrome.storage.session.control.failWrites = true;
+  for (const [id, url, at] of [['c1', 'https://example.com/a', 1000], ['c2', 'https://example.com/b', 2000], ['c3', 'https://example.com/c', 3000]]) {
+    await assert.rejects(() => session.recordClose(closeEvent(id, url, at), 2), StorageFailureError);
+  }
+  chrome.storage.session.control.failWrites = false;
+  // 内存中 a 已被 b、c 挤出，但 c1 仍在 pending 中。
+  assert.deepEqual((await session.query('recent', '')).entries.map((e) => e.url), ['https://example.com/c', 'https://example.com/b']);
+  const result = await session.retryPending({ recentMaxRecords: 2, historyMaxRecords: 2 });
+  assert.equal(result.pending, 0);
+  assert.deepEqual((await session.query('recent', '')).entries.map((e) => e.url), ['https://example.com/c', 'https://example.com/b']);
+  assert.deepEqual(chrome.storage.session.data['incognito.recent'].map((e) => e.url), ['https://example.com/c', 'https://example.com/b']);
+});
+
+test('重复事件重试之前的写入失败时，不计入“尚未保存”', async () => {
+  const { session, chrome } = setup();
+  await session.syncWindows([1]);
+  await session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500);
+  chrome.storage.session.control.failWrites = true;
+  await assert.rejects(() => session.recordVisit(visitEvent('v1', 'https://example.com/b', 1000), 500), StorageFailureError);
+  assert.equal(await session.getPendingCount(), 1);
+  // c1 已保存过：重复事件本身无需保存，只是顺带重试 v1 的写入失败。
+  await assert.rejects(() => session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500), StorageFailureError);
+  assert.equal(await session.getPendingCount(), 1);
+  chrome.storage.session.control.failWrites = false;
+  await session.retryPending({ recentMaxRecords: 500, historyMaxRecords: 500 });
+  assert.equal(await session.getPendingCount(), 0);
+});
+
+test('旧 incognito.state 删除失败只记录，不阻断无痕会话', async () => {
+  const { session, chrome } = setup();
+  chrome.storage.session.data['incognito.state'] = { sessionId: 'legacy', status: 'active', windows: [1] };
+  chrome.storage.session.remove = async () => {
+    throw new Error('remove failed');
+  };
+  const info = await session.getInfo();
+  assert.equal(info.active, false);
+  const started = await session.syncWindows([1]);
+  assert.equal(started.active, true);
+  await session.recordClose(closeEvent('c1', 'https://example.com/a', 1000), 500);
+  assert.equal((await session.query('recent', '')).total, 1);
 });

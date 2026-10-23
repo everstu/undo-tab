@@ -16,3 +16,16 @@ export function formatRelativeTime(closedAt, now = Date.now()) {
   const day = String(date.getDate()).padStart(2, '0');
   return `${date.getFullYear()}/${month}/${day}`;
 }
+
+/**
+ * 单调递增的事件顺序号：以微秒时间戳为基准，同一毫秒内或时钟回拨时递增。
+ * 用于同一时刻多个事件的稳定排序。
+ */
+export function createOrderClock() {
+  let last = 0;
+  return function nextOrder(timestamp) {
+    const base = Math.floor(timestamp * 1000);
+    last = base > last ? base : last + 1;
+    return last;
+  };
+}

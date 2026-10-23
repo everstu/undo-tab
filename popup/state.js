@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, MODES, VIEWS } from '../shared/constants.js';
+import { DEFAULT_SETTINGS, LIMITS, MODES, VIEWS } from '../shared/constants.js';
 
 export function clampPage(page, totalPages) {
   const requested = Number.isInteger(page) && page > 0 ? page : 1;
@@ -81,9 +81,11 @@ export function trimConfirmText({ mode, view = VIEWS.recent, recent = 0, history
 }
 
 export function maxScopeText(mode) {
+  const { min, max } = LIMITS.maxRecords;
+  const range = `可设置 ${min}–${max} 条，超出时按 ${min} 或 ${max} 条保存。`;
   return mode === MODES.incognito
-    ? '最近关闭与历史记录的上限分别设置，修改其中一个不会裁剪另一个列表。'
-    : '当前模式：普通窗口。最近关闭保留上限与历史记录展示上限分别设置；调整展示上限不会删除 Chrome 历史。';
+    ? `最近关闭与历史记录的上限分别设置，修改其中一个不会裁剪另一个列表。${range}`
+    : `当前模式：普通窗口。最近关闭保留上限与历史记录展示上限分别设置；调整展示上限不会删除 Chrome 历史。${range}`;
 }
 
 export function maxLabel(mode) {
@@ -94,4 +96,18 @@ export function dataNote(mode) {
   return mode === MODES.incognito
     ? '本次无痕会话的最近关闭与访问历史仅临时保存；关闭最后一个无痕窗口后自动删除，不上传，也不写入 Chrome 历史。'
     : '普通最近关闭保存在本机；普通历史由 Chrome 管理，扩展只读查询，不复制也不删除。';
+}
+
+export function formatMegabytes(bytes) {
+  const mb = (Number.isFinite(bytes) ? bytes : 0) / (1024 * 1024);
+  if (mb > 0 && mb < 0.1) return '<0.1';
+  return mb >= 10 ? mb.toFixed(0) : mb.toFixed(1);
+}
+
+export function quotaWarningText({ projectedBytes, quotaBytes }) {
+  return `按当前记录的平均大小估算，两个列表都存满时约占 ${formatMegabytes(projectedBytes)} MB，接近或超过浏览器为无痕临时数据提供的 ${formatMegabytes(quotaBytes)} MB 空间；超出后新记录只能暂存在内存中，扩展休眠后可能丢失。`;
+}
+
+export function storageUsageText({ bytesInUse, quotaBytes }) {
+  return `本次无痕记录约占 ${formatMegabytes(bytesInUse)} MB / ${formatMegabytes(quotaBytes)} MB 临时存储空间。`;
 }

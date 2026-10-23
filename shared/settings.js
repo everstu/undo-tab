@@ -1,39 +1,38 @@
 import { DEFAULT_SETTINGS, LIMITS, MODES, SCHEMA_VERSION, VIEWS } from './constants.js';
 
-const DIGITS_ONLY = /^\d+$/;
+const INTEGER_PATTERN = /^-?\d+$/;
 
 /**
  * 把输入解析为整数；空值、小数、非法字符返回 null。
  * 接受数字或字符串（用于 input[type=number].value）。
+ * 超出安全整数的数字串按符号返回 ±Infinity，交给范围收紧处理。
  */
 export function parseIntegerInput(value) {
   if (typeof value === 'number') {
-    return Number.isSafeInteger(value) ? value : null;
+    return Number.isInteger(value) ? value : null;
   }
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    if (!DIGITS_ONLY.test(trimmed)) return null;
+    if (!INTEGER_PATTERN.test(trimmed)) return null;
     const parsed = Number(trimmed);
-    return Number.isSafeInteger(parsed) ? parsed : null;
+    if (Number.isSafeInteger(parsed)) return parsed;
+    return trimmed.startsWith('-') ? -Infinity : Infinity;
   }
   return null;
 }
 
+/**
+ * 校验整数设置。空值、小数、非数字拒绝；越界整数收紧到边界并标记 clamped（'min' | 'max'），
+ * 调用方据此提示“已按边界值保存”。
+ */
 function validateIntegerField(field, value) {
   const limits = LIMITS[field];
   if (value === undefined || value === null) return { ok: false, reason: 'empty' };
   if (typeof value === 'string' && value.trim() === '') return { ok: false, reason: 'empty' };
-  if (typeof value === 'number' && !Number.isInteger(value)) {
-    return { ok: false, reason: 'not-integer' };
-  }
-  if (typeof value !== 'number' && typeof value !== 'string') {
-    return { ok: false, reason: 'not-integer' };
-  }
   const parsed = parseIntegerInput(value);
   if (parsed === null) return { ok: false, reason: 'not-integer' };
-  if (parsed < limits.min || parsed > limits.max) {
-    return { ok: false, reason: 'out-of-range' };
-  }
+  if (parsed < limits.min) return { ok: true, value: limits.min, clamped: 'min' };
+  if (parsed > limits.max) return { ok: true, value: limits.max, clamped: 'max' };
   return { ok: true, value: parsed };
 }
 
@@ -45,19 +44,30 @@ export function validatePopupWidth(value) {
   return validateIntegerField('popupWidth', value);
 }
 
+/**
+ * 读取已保存的条数。1–9（旧规则 1–10000 下合法）与超过上限的值收紧到当前范围；
+ * 0、负数、非整数从未合法，视为损坏，交给旧值/默认值回退，
+ * 避免 worker 初始化时据此把集合裁剪到最小值。用户输入仍按 validateMaxRecords 收紧。
+ */
+function validateStoredMaxRecords(value) {
+  const parsed = parseIntegerInput(value);
+  if (parsed === null || parsed < 1) return { ok: false, reason: 'invalid-stored' };
+  return validateMaxRecords(parsed);
+}
+
 function normalizeMaxRecords(raw, legacyValue) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  const current = validateMaxRecords(source.maxRecords);
+  const current = validateStoredMaxRecords(source.maxRecords);
   if (current.ok) return current.value;
-  const legacy = validateMaxRecords(legacyValue);
+  const legacy = validateStoredMaxRecords(legacyValue);
   return legacy.ok ? legacy.value : DEFAULT_SETTINGS.normal.maxRecords;
 }
 
 function normalizeIncognito(raw, legacyValue) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const fallback = normalizeMaxRecords(source, legacyValue);
-  const recent = validateMaxRecords(source.recentMaxRecords);
-  const history = validateMaxRecords(source.historyMaxRecords);
+  const recent = validateStoredMaxRecords(source.recentMaxRecords);
+  const history = validateStoredMaxRecords(source.historyMaxRecords);
   return {
     recentMaxRecords: recent.ok ? recent.value : fallback,
     historyMaxRecords: history.ok ? history.value : fallback,
@@ -67,13 +77,13 @@ function normalizeIncognito(raw, legacyValue) {
 /**
  * 规范化为 schema 2 设置。旧版顶层 maxRecords 同时作为两种模式的初始值，
  * 旧普通/无痕 maxRecords 分别作为最近关闭与历史上限的初始值。
- * 没有合法旧值时使用默认值 100。
+ * 已保存的越界正整数收紧到当前范围；0、负数、非整数视为损坏，回退到旧值或默认值 100。
  */
 export function normalizeSettings(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const popupWidth = validatePopupWidth(source.popupWidth);
   const normalMax = normalizeMaxRecords(source.normal, source.maxRecords);
-  const normalHistory = validateMaxRecords(source.normal?.historyMaxRecords);
+  const normalHistory = validateStoredMaxRecords(source.normal?.historyMaxRecords);
   return {
     schemaVersion: SCHEMA_VERSION,
     popupWidth: popupWidth.ok ? popupWidth.value : DEFAULT_SETTINGS.popupWidth,
@@ -142,6 +152,20 @@ export function modeMaxRecords(settings, mode, view = VIEWS.recent) {
   return view === VIEWS.history
     ? normalized.incognito.historyMaxRecords
     : normalized.incognito.recentMaxRecords;
+}
+
+/**
+ * 越界输入被收紧时的提示。pending 为 true 表示尚未保存（用于确认框）。
+ */
+export function describeClampNotice(field, clamped, { pending = false } = {}) {
+  const isWidth = field === 'popupWidth';
+  const limits = LIMITS[isWidth ? 'popupWidth' : 'maxRecords'];
+  const bound = clamped === 'min' ? limits.min : limits.max;
+  const word = clamped === 'min' ? '最小' : '最大';
+  const verb = pending ? '将按' : '已按';
+  return isWidth
+    ? `弹窗宽度${word}为 ${bound}px，${verb} ${bound}px 保存`
+    : `记录条数${word}为 ${bound}，${verb} ${bound} 条保存`;
 }
 
 /** 供界面显示的中文错误文案。 */

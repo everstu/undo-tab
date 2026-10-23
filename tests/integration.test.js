@@ -203,10 +203,10 @@ test('新会话建立后，旧标签的迟到更新与关闭不进入新会话',
 test('普通与无痕快照分别存放', async () => {
   const { chrome, incognitoSession } = await setup();
   const normalSnapshots = chrome.storage.session.data['normal.liveTabs'];
-  const incognitoState = chrome.storage.session.data['incognito.state'];
+  const incognitoLiveTabs = chrome.storage.session.data['incognito.liveTabs'];
   assert.ok(Array.isArray(normalSnapshots));
   assert.ok(normalSnapshots.some((snapshot) => snapshot.url === 'https://normal.example/a'));
-  assert.ok(Array.isArray(incognitoState.liveTabs));
-  assert.ok(incognitoState.liveTabs.some((snapshot) => snapshot.url === 'https://inc.example/a'));
-  assert.equal(incognitoState.liveTabs[0].sessionId, (await incognitoSession.getInfo()).sessionId);
+  assert.ok(Array.isArray(incognitoLiveTabs));
+  assert.ok(incognitoLiveTabs.some((snapshot) => snapshot.url === 'https://inc.example/a'));
+  assert.equal(incognitoLiveTabs[0].sessionId, (await incognitoSession.getInfo()).sessionId);
 });

@@ -1,7 +1,12 @@
 import { MODES, SCHEMA_VERSION, STORAGE_KEYS } from '../shared/constants.js';
 import { normalizeSettings, settingsEqual } from '../shared/settings.js';
 import { fallbackTitle, urlKey } from '../shared/urls.js';
-import { StorageFailureError, normalizeCloseEvent, normalizeNormalState } from './normal-store.js';
+import {
+  StorageFailureError,
+  normalizeCloseEvent,
+  normalizeNormalState,
+  serializeNormalState,
+} from './normal-store.js';
 
 function legacyEntry(record, index, uuid) {
   const key = urlKey(record && record.url);
@@ -145,7 +150,7 @@ export async function migrateLegacyData({
   const pending = migratePending(rawPending, rawLiveTabs, normalState.generation, uuid);
 
   try {
-    await localArea.set({ [STORAGE_KEYS.normalRecent]: normalState });
+    await localArea.set({ [STORAGE_KEYS.normalRecent]: serializeNormalState(normalState) });
     await sessionArea.set({ [STORAGE_KEYS.normalPendingCloses]: pending });
     // local 与 session 分开清理，避免旧混合历史/无痕快照残留。
     if (rawRecords !== undefined) await localArea.remove([STORAGE_KEYS.legacyRecords]);

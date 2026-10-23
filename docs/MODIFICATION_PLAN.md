@@ -26,7 +26,7 @@
 
 ### 2.1 条数分别配置、分别计算
 
-普通最近关闭使用 normal.maxRecords，普通历史展示使用 normal.historyMaxRecords；无痕最近关闭使用 incognito.recentMaxRecords，无痕历史记录使用 incognito.historyMaxRecords。四个值默认均为 100，允许 1–10000 的整数。两种模式的设置页各提供两个输入框和各自的保存按钮，不提供模式切换器。
+普通最近关闭使用 normal.maxRecords，普通历史展示使用 normal.historyMaxRecords；无痕最近关闭使用 incognito.recentMaxRecords，无痕历史记录使用 incognito.historyMaxRecords。四个值默认均为 100，允许 10–1000 的整数；小于 10 按 10 保存、大于 1000 按 1000 保存，并提示已按边界值保存（空值、小数、非数字仍拒绝）。已保存的越界值在初始化时同样收紧，并按新上限立即裁剪超出的最旧记录。两种模式的设置页各提供两个输入框和各自的保存按钮，不提供模式切换器。
 
 具体配额口径：
 
@@ -43,7 +43,7 @@
 
 ### 2.2 沿用宽度功能
 
-popupWidth 默认 440px，允许 360–800px，普通与无痕共用；保存后当前弹窗立即生效，持久保留，支持仅恢复默认宽度。修改宽度不重置当前标签、搜索词和有效页码，不裁剪记录。
+popupWidth 默认 440px，允许 360–800px（越界时按 360 或 800px 保存并提示），普通与无痕共用；弹窗高度固定 580px，不提供设置；保存后当前弹窗立即生效，持久保留，支持仅恢复默认宽度。修改宽度不重置当前标签、搜索词和有效页码，不裁剪记录。
 
 仅设置偏好写入 storage.local，不把无痕访问数据混入配置。
 
@@ -131,7 +131,8 @@ chrome.history.search({
 | storage.local | normal.recent | 普通关闭条目及清空代次 |
 | storage.session | normal.liveTabs | 普通活动标签快照 |
 | storage.session | normal.pendingCloses | 普通待补写关闭事件 |
-| storage.session | incognito.state | 本次无痕 sessionId、状态、窗口集合、最近关闭、访问历史、活动快照、待补写事件与清空代次 |
+| storage.session | incognito.meta | 本次无痕 sessionId、状态、窗口集合、待补写事件与清空代次 |
+| storage.session | incognito.recent / incognito.history / incognito.liveTabs | 无痕最近关闭、访问历史、活动快照；每次只重写变动的 key，需同时变动的部分同一次写入 |
 
 配置示例：
 
@@ -176,7 +177,7 @@ storage.session 能跨 Service Worker 休眠保留数据，但其官方生命周
 1. 先结束旧会话、更新代次，阻止旧事件继续写入。
 2. 清空无痕最近关闭和访问历史。
 3. 清空对应活动快照、待补写事件、索引、标题/favicon 等页面缓存和运行时数组。
-4. 将 incognito.state 覆盖为空的已结束状态；普通记录与配置不受影响。
+4. 将 incognito.* 各 key 在同一次写入中覆盖为空的已结束状态；普通记录与配置不受影响。
 
 如果 tabs.onRemoved 先于窗口事件到达，相关条目可以先生成，最终会被会话清理；如果后于清理到达，凭旧 sessionId 直接丢弃。标题查询、导航、失败重试或弹窗请求的迟到结果同样丢弃。
 
@@ -195,7 +196,7 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 本次必须一并处理：
 
 - 清空一个集合时，更新该集合清空代次，并同时取消此前属于该集合的待补写事件。
-- 单条删除时，取消此前同 URL 的待补写；后来发生的真实关闭/访问仍可生成新条目。
+- 单条删除时，取消此前同一集合、同 URL 的待补写；后来发生的真实关闭/访问仍可生成新条目。普通删除标记只在存在同 URL 旧 pending 时写入，pending 取消落盘后及 worker 初始化时清理；无痕删除与取消 pending 原子写入，不需要标记。
 - 手动清空列表不丢弃仍打开标签的必要关闭快照，保留并关联到新代次，以便用户以后关闭这些标签时仍可正常记录。
 - 最后一个无痕窗口关闭时，则连活动快照一起清空，因为旧会话已经结束。
 - 补写前同时校验模式、会话、集合代次及事件新旧，旧事件不能使已删除的数据回来。
@@ -256,7 +257,7 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 
 当前 settings.schemaVersion 为 1，历史是 local 中的 history.records 混合数组。升级到 schemaVersion: 2，在后台初始化队列中进行幂等迁移：
 
-1. 保留 popupWidth；将旧 maxRecords 分别作为 normal.maxRecords、normal.historyMaxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords 的初值，非法或缺失且没有合法旧值时用默认值 100。已有 schema 2 缺少 normal.historyMaxRecords 时继承原普通上限，incognito.maxRecords 同样回填两个字段，新的合法独立值优先保留；重复迁移不重置已保存的值。
+1. 保留 popupWidth；将旧 maxRecords 分别作为 normal.maxRecords、normal.historyMaxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords 的初值，越界的正整数收紧到 10–1000（宽度收紧到 360–800）；0、负数、非整数从未合法，视为损坏，回退到旧值，没有可用旧值时用默认值 100。已有 schema 2 缺少 normal.historyMaxRecords 时继承原普通上限，incognito.maxRecords 同样回填两个字段，新的合法独立值优先保留；重复迁移不重置已保存的值。
 2. 读取旧 history.records，只保留 mode === normal 的有效 http/https 记录；若新 normal.recent 已存在，同时读取它，避免中途失败后重试覆盖已经迁移的数据。
 3. 合并新旧普通记录后按完整 URL 去重，保留同 URL 中最后关闭的记录及元数据，写入 normal.recent，并按普通上限裁剪。旧 key 已不存在时，不能把现有新集合覆盖成空数组。
 4. 删除旧混合历史 key，清除旧 live.tabs 中遗留的无痕快照及无痕待写。普通活动快照按新结构重建；有效的普通 pendingClose 单独迁入 normal.pendingCloses，保留原事件时间及幂等标识，再删除旧 live.tabs。
@@ -307,7 +308,8 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 | URL 去重 | 同一模式相同完整 URL 连关两次，只有一条，时间/标题/顺序更新 |
 | URL 区别 | 不同 query 或 fragment 的网址分别保留；普通/无痕同 URL 各自独立 |
 | 重试新旧 | 较旧失败事件晚补写，不覆盖较新关闭记录或造成重复 |
-| 独立上限 | 普通最近关闭设 4、普通历史展示设 5、无痕最近关闭设 2、无痕历史设 3，各自保留或展示 4/5/2/3 条；修改其中一项不裁剪其他列表 |
+| 独立上限 | 普通最近关闭设 12、普通历史展示设 13、无痕最近关闭设 10、无痕历史设 11，各自保留或展示 12/13/10/11 条；修改其中一项不裁剪其他列表 |
+| 越界收紧 | 条数输入 3/5000 分别按 10/1000 保存并提示，宽度输入 300/1200 分别按 360/800 保存并提示；空值、小数仍拒绝 |
 | 历史过滤补足 | 混入 file 等历史后，仍展示满设定的 100/200 条有效网页；不足时返回实际条数，Chrome 历史不被删除 |
 | 独立视图计数 | 无痕最近关闭与访问历史各自计数/裁剪；普通历史只限显示，不删除 Chrome 数据 |
 | 多无痕窗口 | 关闭一个但还剩另一个时，两个无痕列表均保留 |

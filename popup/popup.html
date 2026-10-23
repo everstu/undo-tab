@@ -67,8 +67,8 @@
                 class="field-input"
                 type="number"
                 inputmode="numeric"
-                min="1"
-                max="10000"
+                min="10"
+                max="1000"
                 step="1"
               />
               <button id="save-max-records" class="primary-btn" type="button">保存</button>
@@ -83,8 +83,8 @@
                   class="field-input"
                   type="number"
                   inputmode="numeric"
-                  min="1"
-                  max="10000"
+                  min="10"
+                  max="1000"
                   step="1"
                 />
                 <button id="save-history-max-records" class="primary-btn" type="button">保存</button>
@@ -103,7 +103,7 @@
 
           <section class="settings-block">
             <h2 class="settings-h2">弹窗宽度</h2>
-            <p class="settings-desc">默认 440px，可设置 360–800px，普通与无痕窗口共用，保存后立即生效。</p>
+            <p class="settings-desc">默认 440px，可设置 360–800px（超出时按 360 或 800px 保存），普通与无痕窗口共用，保存后立即生效。</p>
             <div class="field-row">
               <label class="field-label" for="popup-width">弹窗宽度（px）</label>
               <input
@@ -127,6 +127,7 @@
           <section id="incognito-block" class="settings-block" hidden>
             <h2 class="settings-h2">本次无痕会话</h2>
             <p id="incognito-status" class="settings-desc"></p>
+            <p id="incognito-usage" class="settings-desc" hidden></p>
             <button id="clear-incognito-data" class="danger-btn" type="button">清空本次记录</button>
             <div id="clear-incognito-confirm" class="confirm-box" hidden>
               <p class="confirm-text">确认清空本次无痕会话的最近关闭与访问历史？普通数据不受影响。</p>

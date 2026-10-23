@@ -104,3 +104,13 @@ test('设置说明文案', () => {
   assert.match(dataNote('normal'), /只读查询/);
   assert.match(dataNote('incognito'), /关闭最后一个无痕窗口/);
 });
+
+test('存储占用与配额提示文案', async () => {
+  const { formatMegabytes, quotaWarningText, storageUsageText } = await import('../popup/state.js');
+  assert.equal(formatMegabytes(0), '0.0');
+  assert.equal(formatMegabytes(1024), '<0.1');
+  assert.equal(formatMegabytes(1.5 * 1024 * 1024), '1.5');
+  assert.equal(formatMegabytes(10 * 1024 * 1024), '10');
+  assert.match(storageUsageText({ bytesInUse: 2 * 1024 * 1024, quotaBytes: 10 * 1024 * 1024 }), /2\.0 MB \/ 10 MB/);
+  assert.match(quotaWarningText({ projectedBytes: 12 * 1024 * 1024, quotaBytes: 10 * 1024 * 1024 }), /约占 12 MB.*10 MB/);
+});
