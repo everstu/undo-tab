@@ -148,7 +148,7 @@ export function createMessageHandler({
       }
       let result;
       try {
-        result = await historyService.searchNormal(query, settings.normal.maxRecords);
+        result = await historyService.searchNormal(query, settings.normal.historyMaxRecords);
       } catch (error) {
         return fail(ERROR_CODES.unknown, '无法读取 Chrome 历史，请检查扩展权限');
       }
@@ -300,16 +300,16 @@ export function createMessageHandler({
     let maxRecords = null;
     let limitView = null;
     if (Object.prototype.hasOwnProperty.call(patch, 'maxRecords')) {
-      limitView = context.mode === MODES.incognito ? validateView(message.view) : VIEWS.recent;
+      limitView = context.mode === MODES.normal && message.view === undefined ? VIEWS.recent : validateView(message.view);
       if (!limitView) return fail(ERROR_CODES.invalidRequest, '请选择要修改的记录上限');
       const validation = validateMaxRecords(patch.maxRecords);
       if (!validation.ok) {
         return fail('invalid-settings', describeFieldError(`${context.mode}.maxRecords`, validation.reason));
       }
       maxRecords = validation.value;
-      const field = context.mode === MODES.normal
-        ? 'maxRecords'
-        : limitView === VIEWS.history ? 'historyMaxRecords' : 'recentMaxRecords';
+      const field = limitView === VIEWS.history
+        ? 'historyMaxRecords'
+        : context.mode === MODES.normal ? 'maxRecords' : 'recentMaxRecords';
       settingsPatch[context.mode] = { [field]: maxRecords };
     }
     if (!Object.prototype.hasOwnProperty.call(settingsPatch, 'popupWidth') && maxRecords === null) {
@@ -323,7 +323,7 @@ export function createMessageHandler({
     }
 
     let trimmed = { recent: 0, history: 0, total: 0 };
-    if (context.mode === MODES.normal && maxRecords !== null) {
+    if (context.mode === MODES.normal && maxRecords !== null && limitView === VIEWS.recent) {
       const result = await normalStore.updateLimitAndSettings(merged.settings, maxRecords);
       trimmed = { recent: result.trimmed, history: 0, total: result.total };
       return {
@@ -343,13 +343,19 @@ export function createMessageHandler({
   async function getTrimPreview(message) {
     const context = await resolveContext(message.windowId);
     if (!context) return fail(ERROR_CODES.contextLost);
-    const limitView = context.mode === MODES.incognito ? validateView(message.view) : VIEWS.recent;
+    const limitView = context.mode === MODES.normal && message.view === undefined ? VIEWS.recent : validateView(message.view);
     if (!limitView) return fail(ERROR_CODES.invalidRequest, '请选择要修改的记录上限');
     const validation = validateMaxRecords(message.maxRecords);
     if (!validation.ok) {
       return fail('invalid-settings', describeFieldError(`${context.mode}.maxRecords`, validation.reason));
     }
     if (context.mode === MODES.normal) {
+      if (limitView === VIEWS.history) {
+        return {
+          ok: true,
+          data: { recent: 0, history: 0, recentTotal: 0, historyTotal: 0, limit: validation.value },
+        };
+      }
       const preview = await normalStore.previewTrim(validation.value);
       return {
         ok: true,

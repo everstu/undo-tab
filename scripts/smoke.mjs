@@ -1,20 +1,24 @@
 /**
  * Undo Tab 真实 Chrome 冒烟测试（schema 2）。
- * 结论写入 docs/smoke-report.json；无痕窗口部分受 Chrome/CDP 限制时如实标记跳过。
+ * 结论写入 .tmp/reports/smoke-report.json；截图写入 .tmp/screenshots/。
+ * 无痕窗口部分受 Chrome/CDP 限制时如实标记跳过。
  *
  * 运行：node scripts/smoke.mjs [--headed] [--keep-profile]
  */
 
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { launchChrome, sleep, startSite, waitFor } from './chrome-harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const extensionPath = root;
-const profileDir = path.join(root, '.tmp', 'smoke-profile');
+const tempRoot = path.join(root, '.tmp');
+const screenshotDir = path.join(tempRoot, 'screenshots');
+const reportDir = path.join(tempRoot, 'reports');
+const profileDir = path.join(tempRoot, 'smoke-profile');
 const headless = !process.argv.includes('--headed');
 const keepProfile = process.argv.includes('--keep-profile');
 
@@ -236,7 +240,8 @@ async function capturePopup(name) {
     },
     popup.sessionId,
   );
-  const file = path.join(root, 'docs', name);
+  await mkdir(screenshotDir, { recursive: true });
+  const file = path.join(screenshotDir, name);
   await writeFile(file, Buffer.from(shot.data, 'base64'));
   return file;
 }
@@ -279,9 +284,10 @@ try {
     await must('A2 设置 schema 2 与共享宽度默认值', async () => {
       const settings = (await storageLocal()).settings;
       assertEqual(settings.schemaVersion, 2, 'schemaVersion');
-      assertEqual(settings.normal.maxRecords, 500, '普通上限');
-      assertEqual(settings.incognito.recentMaxRecords, 500, '无痕最近关闭上限');
-      assertEqual(settings.incognito.historyMaxRecords, 500, '无痕历史上限');
+      assertEqual(settings.normal.maxRecords, 100, '普通最近关闭上限');
+      assertEqual(settings.normal.historyMaxRecords, 100, '普通历史上限');
+      assertEqual(settings.incognito.recentMaxRecords, 100, '无痕最近关闭上限');
+      assertEqual(settings.incognito.historyMaxRecords, 100, '无痕历史上限');
       assertEqual(settings.popupWidth, 440, '弹窗宽度');
       const info = await popupInfo();
       assertEqual(info.width, '440px', '弹窗计算宽度');
@@ -364,7 +370,7 @@ try {
       }, { label: '普通历史列表' });
       assert(historyUrlRows(info).some((row) => row.url.includes('/alpha')), '历史中缺少 alpha');
       assert(info.rows.every((row) => row.deleteButtons === 0), '普通历史出现删除按钮');
-      assert(/^已载入 \d+ 条 · 展示上限 500/.test(info.counts), `页脚：${info.counts}`);
+      assert(/^已载入 \d+ 条 · 展示上限 100/.test(info.counts), `页脚：${info.counts}`);
       await capturePopup('popup-screenshot.png');
       return info.counts;
     });
@@ -402,6 +408,60 @@ try {
       assert(/只读查询/.test(panel.dataNote), '数据说明');
       await backToList();
       return '只读入口可见，无清空入口';
+    });
+
+    await must('C4 普通历史独立上限，过滤 file 后仍展示满 100/200 条', async () => {
+      // 仅在隔离 profile 中注入合成普通历史；扩展运行时代码不添加浏览器历史。
+      const marker = 'undo-tab-limit-fixture';
+      const fixtureUrls = Array.from({ length: 210 }, (_, index) => index % 100 === 50
+        ? pathToFileURL(path.join(profileDir, `${marker}-${index}.html`)).href
+        : `${site.origin}/${marker}-${index}`);
+      for (const index of [50, 150]) {
+        await writeFile(path.join(profileDir, `${marker}-${index}.html`), '<title>Undo Tab history fixture</title>');
+      }
+      await evaluatePopup(`(async () => {
+        for (const url of ${JSON.stringify(fixtureUrls)}) await chrome.history.addUrl({ url });
+      })()`);
+      const recentBefore = JSON.stringify(await normalEntries());
+      const raw = await evaluatePopup(`(async () => {
+        const rows = await chrome.history.search({ text: ${JSON.stringify(marker)}, startTime: 0, maxResults: 1000 });
+        return { total: rows.length, files: rows.filter(item => item.url.startsWith('file:')).length };
+      })()`);
+      assertEqual(raw.total, 210, '合成历史总数');
+      assertEqual(raw.files, 2, '真实 Chrome 返回的 file 历史');
+      await setSearch(marker);
+      for (const limit of [100, 200]) {
+        await openSettings();
+        assertEqual(await evaluatePopup("document.getElementById('history-limit-block').hidden"), false, '普通历史上限输入可见');
+        assertEqual(await evaluatePopup("document.getElementById('history-max-records-label').textContent"), '历史记录最多展示多少条', '普通历史标签');
+        await evaluatePopup(`(() => {
+          const input = document.getElementById('history-max-records');
+          input.value = '${limit}';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          document.getElementById('save-history-max-records').click();
+        })()`);
+        await waitFor(async () => (await storageLocal()).settings.normal.historyMaxRecords === limit,
+          { label: `普通历史上限保存为 ${limit}` });
+        assertEqual(await evaluatePopup("document.getElementById('trim-confirm').hidden"), true, '普通历史不应出现删除确认');
+        assertEqual(JSON.stringify(await normalEntries()), recentBefore, '修改历史上限不应裁剪最近关闭');
+        await backToList();
+        await waitFor(async () => (await popupInfo()).counts === `匹配 ${limit} 条 · 展示上限 ${limit}`,
+          { label: `过滤后展示满 ${limit} 条` });
+        const first = await popupInfo();
+        assertEqual(first.pageLabel, `1/${limit / 50}`, '历史分页');
+        assertEqual(first.rows.length, 50, '历史首页条数');
+        for (let page = 1; page < limit / 50; page += 1) {
+          await evaluatePopup("document.getElementById('next-page').click()");
+        }
+        const last = await popupInfo();
+        assertEqual(last.rows.length, 50, '过滤后历史末页条数');
+        assert(last.rows.every(row => row.url.startsWith('http:')), '非网页网址进入列表');
+        await setSearch(marker);
+      }
+      const remaining = await evaluatePopup(`chrome.history.search({ text: ${JSON.stringify(marker)}, startTime: 0, maxResults: 1000 }).then(items => items.length)`);
+      assertEqual(remaining, 210, '设置展示上限不得删除 Chrome 历史');
+      await setSearch('');
+      return '真实 Chrome 合成历史含 2 条 file；100/200 条均补足，末页各 50 条';
     });
   });
 
@@ -444,9 +504,10 @@ try {
       }, { label: '普通记录裁剪到 2' });
       const settings = (await storageLocal()).settings;
       assertEqual(settings.normal.maxRecords, 2, '普通上限');
-      assertEqual(settings.incognito.recentMaxRecords, 500, '无痕最近关闭上限被改动');
-      assertEqual(settings.incognito.historyMaxRecords, 500, '无痕历史上限被改动');
-      return '普通 2 条，无痕仍 500';
+      assertEqual(settings.normal.historyMaxRecords, 200, '普通历史上限被改动');
+      assertEqual(settings.incognito.recentMaxRecords, 100, '无痕最近关闭上限被改动');
+      assertEqual(settings.incognito.historyMaxRecords, 100, '无痕历史上限被改动');
+      return '普通最近关闭 2 条，历史展示上限仍 200，无痕仍 100';
     });
 
     await must('D2 宽度 360/800 保存立即生效，可恢复 440', async () => {
@@ -508,7 +569,7 @@ try {
     });
 
     await must('D5 截图已生成', async () => {
-      return 'docs/popup-screenshot.png（C1）、docs/popup-360.png（D2）';
+      return '.tmp/screenshots/popup-screenshot.png（C1）、.tmp/screenshots/popup-360.png（D2）';
     });
   });
 
@@ -525,6 +586,9 @@ try {
         return current.rows.length === 1 ? current : null;
       }, { label: '重启后记录' });
       assertEqual(info.rows[0].url, site.origin + '/gamma', '重启后记录网址');
+      const settings = (await storageLocal()).settings;
+      assertEqual(settings.normal.maxRecords, 2, '重启后普通最近关闭上限');
+      assertEqual(settings.normal.historyMaxRecords, 200, '重启后普通历史上限');
       return '1 条记录保留';
     });
 
@@ -554,6 +618,7 @@ try {
       const local = await storageLocal();
       assertEqual(local.settings.schemaVersion, 2, '迁移 schema');
       assertEqual(local.settings.normal.maxRecords, 42, '迁移普通上限');
+      assertEqual(local.settings.normal.historyMaxRecords, 42, '迁移普通历史上限');
       assertEqual(local.settings.incognito.recentMaxRecords, 42, '迁移无痕最近关闭上限');
       assertEqual(local.settings.incognito.historyMaxRecords, 42, '迁移无痕历史上限');
       assertEqual(local['history.records'], undefined, '旧记录 key');
@@ -585,9 +650,8 @@ try {
   });
 } finally {
   if (harness) await harness.stop().catch(() => {});
-  if (!keepProfile) {
+  if (!keepProfile && path.dirname(path.resolve(profileDir)) === tempRoot) {
     await rm(profileDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-    await rm(path.join(root, '.tmp'), { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
   }
   if (site) await site.close().catch(() => {});
 
@@ -601,8 +665,8 @@ try {
     failed: results.filter((item) => !item.ok).length,
     results,
   };
-  await mkdir(path.join(root, 'docs'), { recursive: true });
-  await writeFile(path.join(root, 'docs', 'smoke-report.json'), JSON.stringify(report, null, 2));
+  await mkdir(reportDir, { recursive: true });
+  await writeFile(path.join(reportDir, 'smoke-report.json'), JSON.stringify(report, null, 2));
   log(`\n结果：${report.passed} 通过 / ${report.skipped} 跳过 / ${report.failed} 失败（共 ${report.total} 项）`);
   if (report.failed > 0) {
     log('失败项：');

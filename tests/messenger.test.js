@@ -79,7 +79,8 @@ test('getContext 由 windowId 重新确认模式', async () => {
   const normal = await handler({ type: 'undoTab:getContext', windowId: normalWin.id }, sender);
   assert.equal(normal.ok, true);
   assert.equal(normal.data.mode, 'normal');
-  assert.equal(normal.data.settings.normal.maxRecords, 500);
+  assert.equal(normal.data.settings.normal.maxRecords, 100);
+  assert.equal(normal.data.settings.normal.historyMaxRecords, 100);
 
   const incognito = await handler({ type: 'undoTab:getContext', windowId: incognitoWin.id }, sender);
   assert.equal(incognito.data.mode, 'incognito');
@@ -129,7 +130,7 @@ test('普通历史来自 Chrome 只读查询，删除与清空被拒绝', async 
   assert.equal(view.data.entries.length, 1);
   assert.equal(view.data.loaded, 1);
   assert.equal(chrome.__test.historySearchCalls[0].startTime, 0);
-  assert.equal(chrome.__test.historySearchCalls[0].maxResults, 500);
+  assert.equal(chrome.__test.historySearchCalls[0].maxResults, 100);
 
   const removed = await handler(
     { type: 'undoTab:deleteEntry', windowId: normalWin.id, view: 'history', id: view.data.entries[0].id },
@@ -168,8 +169,9 @@ test('普通上限只裁剪普通最近关闭，无痕配额不变', async () =>
   assert.equal(updated.data.trimmed.recent, 1);
   assert.equal((await normalStore.getEntries()).length, 1);
   assert.equal((await incognitoSession.query('recent', '')).total, 2);
-  assert.deepEqual((await settingsStore.get()).incognito, { recentMaxRecords: 500, historyMaxRecords: 500 });
+  assert.deepEqual((await settingsStore.get()).incognito, { recentMaxRecords: 100, historyMaxRecords: 100 });
   assert.equal((await settingsStore.get()).normal.maxRecords, 1);
+  assert.equal((await settingsStore.get()).normal.historyMaxRecords, 100);
 
   const incognitoPreview = await handler(
     { type: 'undoTab:getTrimPreview', windowId: incognitoWin.id, view: 'recent', maxRecords: 1 },
@@ -195,8 +197,8 @@ test('无痕设置不影响普通设置，宽度共享', async () => {
   assert.equal(updated.ok, true);
   const settings = await settingsStore.get();
   assert.equal(settings.incognito.recentMaxRecords, 20);
-  assert.equal(settings.incognito.historyMaxRecords, 500);
-  assert.equal(settings.normal.maxRecords, 500);
+  assert.equal(settings.incognito.historyMaxRecords, 100);
+  assert.equal(settings.normal.maxRecords, 100);
   assert.equal(settings.popupWidth, 600);
 });
 

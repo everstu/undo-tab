@@ -71,6 +71,7 @@ test('迁移只保留普通记录、按 URL 去重并清理旧 key', async () =>
   assert.equal(settings.schemaVersion, 2);
   assert.equal(settings.popupWidth, 600);
   assert.equal(settings.normal.maxRecords, 42);
+  assert.equal(settings.normal.historyMaxRecords, 42);
   assert.deepEqual(settings.incognito, { recentMaxRecords: 42, historyMaxRecords: 42 });
 
   const recent = chrome.storage.local.data['normal.recent'];
@@ -150,7 +151,7 @@ test('迁移后旧 key 不存在且 schema 已为 2 时快速返回', async () =
   chrome.storage.local.data.settings = {
     schemaVersion: 2,
     popupWidth: 440,
-    normal: { maxRecords: 500 },
+    normal: { maxRecords: 500, historyMaxRecords: 500 },
     incognito: { recentMaxRecords: 500, historyMaxRecords: 500 },
   };
   const result = await migrateLegacyData({

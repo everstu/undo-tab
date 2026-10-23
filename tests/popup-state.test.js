@@ -34,6 +34,7 @@ test('分页与页码边界', () => {
 });
 
 test('页脚只显示当前模式的当前视图数量', () => {
+  assert.equal(footerText({ mode: 'normal', view: 'history', loaded: 99 }), '已载入 99 条 · 展示上限 100');
   assert.equal(
     footerText({ mode: 'normal', view: 'recent', query: '', total: 32, limit: 500 }),
     '共 32 条 · 上限 500',
@@ -97,6 +98,7 @@ test('清空与裁剪文案分别说明范围', () => {
 
 test('设置说明文案', () => {
   assert.match(maxScopeText('normal'), /Chrome 历史/);
+  assert.match(maxScopeText('normal'), /展示上限分别设置/);
   assert.match(maxScopeText('incognito'), /分别设置/);
   assert.match(maxLabel('incognito'), /最近关闭/);
   assert.match(dataNote('normal'), /只读查询/);

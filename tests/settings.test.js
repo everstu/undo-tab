@@ -15,13 +15,13 @@ test('schema 2 默认设置与旧版 maxRecords 迁移', () => {
   assert.deepEqual(normalizeSettings(null), {
     schemaVersion: 2,
     popupWidth: 440,
-    normal: { maxRecords: 500 },
-    incognito: { recentMaxRecords: 500, historyMaxRecords: 500 },
+    normal: { maxRecords: 100, historyMaxRecords: 100 },
+    incognito: { recentMaxRecords: 100, historyMaxRecords: 100 },
   });
   assert.deepEqual(normalizeSettings({ maxRecords: 42, popupWidth: 700 }), {
     schemaVersion: 2,
     popupWidth: 700,
-    normal: { maxRecords: 42 },
+    normal: { maxRecords: 42, historyMaxRecords: 42 },
     incognito: { recentMaxRecords: 42, historyMaxRecords: 42 },
   });
 });
@@ -33,10 +33,10 @@ test('分模式设置独立规范化', () => {
     incognito: { maxRecords: 0 },
   });
   assert.equal(settings.normal.maxRecords, 12);
-  assert.equal(settings.incognito.recentMaxRecords, 500);
-  assert.equal(settings.incognito.historyMaxRecords, 500);
+  assert.equal(settings.incognito.recentMaxRecords, 100);
+  assert.equal(settings.incognito.historyMaxRecords, 100);
   assert.equal(modeMaxRecords(settings, 'normal'), 12);
-  assert.equal(modeMaxRecords(settings, 'incognito'), 500);
+  assert.equal(modeMaxRecords(settings, 'incognito'), 100);
 });
 
 test('条数边界', () => {
@@ -62,6 +62,7 @@ test('合并设置：只改普通上限不动无痕与宽度', () => {
   const result = mergeSettings(current, { normal: { maxRecords: 3 } });
   assert.deepEqual(result.errors, []);
   assert.equal(result.settings.normal.maxRecords, 3);
+  assert.equal(result.settings.normal.historyMaxRecords, 10);
   assert.equal(result.settings.incognito.recentMaxRecords, 20);
   assert.equal(result.settings.incognito.historyMaxRecords, 20);
   assert.equal(result.settings.popupWidth, 600);
@@ -107,4 +108,24 @@ test('旧无痕上限回填两个字段，新字段优先且各自独立', () =>
   const invalid = mergeSettings(result.settings, { incognito: { historyMaxRecords: 0 } });
   assert.equal(invalid.changed, false);
   assert.deepEqual(invalid.errors, [{ field: 'incognito.historyMaxRecords', reason: 'out-of-range' }]);
+});
+
+test('普通历史上限兼容旧值，独立保存且参与设置比较与校验', () => {
+  assert.deepEqual(normalizeSettings({ normal: { maxRecords: 500 } }).normal,
+    { maxRecords: 500, historyMaxRecords: 500 });
+  const current = normalizeSettings({ popupWidth: 600, normal: { maxRecords: 12, historyMaxRecords: 80 } });
+  assert.equal(modeMaxRecords(current, 'normal', 'recent'), 12);
+  assert.equal(modeMaxRecords(current, 'normal', 'history'), 80);
+  const saved = mergeSettings(current, { normal: { historyMaxRecords: 3 } });
+  assert.deepEqual(saved.settings.normal, { maxRecords: 12, historyMaxRecords: 3 });
+  assert.deepEqual(saved.settings.incognito, current.incognito);
+  assert.equal(saved.settings.popupWidth, 600);
+  assert.equal(saved.changed, true);
+  assert.equal(settingsEqual(current, saved.settings), false);
+  const invalid = mergeSettings(current, { normal: { historyMaxRecords: 0 } });
+  assert.equal(invalid.changed, false);
+  assert.deepEqual(invalid.errors, [{ field: 'normal.historyMaxRecords', reason: 'out-of-range' }]);
+  assert.match(describeFieldError('normal.historyMaxRecords', 'out-of-range'), /1–10000/);
+  assert.deepEqual(normalizeSettings({ normal: { maxRecords: 0, historyMaxRecords: -1 } }).normal,
+    { maxRecords: 100, historyMaxRecords: 100 });
 });

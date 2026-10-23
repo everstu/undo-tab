@@ -1,4 +1,4 @@
-import { MODES, VIEWS } from '../shared/constants.js';
+import { DEFAULT_SETTINGS, MODES, VIEWS } from '../shared/constants.js';
 
 export function clampPage(page, totalPages) {
   const requested = Number.isInteger(page) && page > 0 ? page : 1;
@@ -21,7 +21,7 @@ export function paginate(items, page = 1, pageSize = 50) {
   };
 }
 
-export function footerText({ mode, view, query = '', total = 0, matchCount = 0, loaded = 0, limit = 500 }) {
+export function footerText({ mode, view, query = '', total = 0, matchCount = 0, loaded = 0, limit = DEFAULT_SETTINGS.normal.maxRecords }) {
   const hasQuery = typeof query === 'string' && query.trim() !== '';
   if (view === VIEWS.recent) {
     return hasQuery ? `匹配 ${matchCount} 条` : `共 ${total} 条 · 上限 ${limit}`;
@@ -69,7 +69,7 @@ export function clearConfirmText(mode, view) {
   return '确认清空本次无痕会话的访问历史？最近关闭不受影响。';
 }
 
-export function trimConfirmText({ mode, view = VIEWS.recent, recent = 0, history = 0, limit = 500 }) {
+export function trimConfirmText({ mode, view = VIEWS.recent, recent = 0, history = 0, limit = DEFAULT_SETTINGS.normal.maxRecords }) {
   if (mode === MODES.incognito) {
     const isHistory = view === VIEWS.history;
     const label = isHistory ? '历史记录' : '最近关闭记录';
@@ -83,7 +83,7 @@ export function trimConfirmText({ mode, view = VIEWS.recent, recent = 0, history
 export function maxScopeText(mode) {
   return mode === MODES.incognito
     ? '最近关闭与历史记录的上限分别设置，修改其中一个不会裁剪另一个列表。'
-    : '当前模式：普通窗口。上限只作用于普通最近关闭，不影响 Chrome 历史。';
+    : '当前模式：普通窗口。最近关闭保留上限与历史记录展示上限分别设置；调整展示上限不会删除 Chrome 历史。';
 }
 
 export function maxLabel(mode) {

@@ -45,17 +45,17 @@ export function validatePopupWidth(value) {
   return validateIntegerField('popupWidth', value);
 }
 
-function normalizeMode(raw, legacyValue) {
+function normalizeMaxRecords(raw, legacyValue) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const current = validateMaxRecords(source.maxRecords);
-  if (current.ok) return { maxRecords: current.value };
+  if (current.ok) return current.value;
   const legacy = validateMaxRecords(legacyValue);
-  return { maxRecords: legacy.ok ? legacy.value : DEFAULT_SETTINGS.normal.maxRecords };
+  return legacy.ok ? legacy.value : DEFAULT_SETTINGS.normal.maxRecords;
 }
 
 function normalizeIncognito(raw, legacyValue) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  const fallback = normalizeMode(source, legacyValue).maxRecords;
+  const fallback = normalizeMaxRecords(source, legacyValue);
   const recent = validateMaxRecords(source.recentMaxRecords);
   const history = validateMaxRecords(source.historyMaxRecords);
   return {
@@ -66,16 +66,18 @@ function normalizeIncognito(raw, legacyValue) {
 
 /**
  * 规范化为 schema 2 设置。旧版顶层 maxRecords 同时作为两种模式的初始值，
- * 旧无痕 maxRecords 分别作为最近关闭与访问历史上限的初始值。
- * 缺失或非法字段使用默认值 500。
+ * 旧普通/无痕 maxRecords 分别作为最近关闭与历史上限的初始值。
+ * 没有合法旧值时使用默认值 100。
  */
 export function normalizeSettings(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const popupWidth = validatePopupWidth(source.popupWidth);
+  const normalMax = normalizeMaxRecords(source.normal, source.maxRecords);
+  const normalHistory = validateMaxRecords(source.normal?.historyMaxRecords);
   return {
     schemaVersion: SCHEMA_VERSION,
     popupWidth: popupWidth.ok ? popupWidth.value : DEFAULT_SETTINGS.popupWidth,
-    normal: normalizeMode(source.normal, source.maxRecords),
+    normal: { maxRecords: normalMax, historyMaxRecords: normalHistory.ok ? normalHistory.value : normalMax },
     incognito: normalizeIncognito(source.incognito, source.maxRecords),
   };
 }
@@ -86,6 +88,7 @@ export function settingsEqual(a, b) {
     a.schemaVersion === b.schemaVersion &&
     a.popupWidth === b.popupWidth &&
     a.normal?.maxRecords === b.normal?.maxRecords &&
+    a.normal?.historyMaxRecords === b.normal?.historyMaxRecords &&
     a.incognito?.recentMaxRecords === b.incognito?.recentMaxRecords &&
     a.incognito?.historyMaxRecords === b.incognito?.historyMaxRecords
   );
@@ -93,7 +96,7 @@ export function settingsEqual(a, b) {
 
 /**
  * 合并设置补丁：
- *   { popupWidth?, normal?: { maxRecords? }, incognito?: { recentMaxRecords?, historyMaxRecords? } }
+ *   { popupWidth?, normal?: { maxRecords?, historyMaxRecords? }, incognito?: { recentMaxRecords?, historyMaxRecords? } }
  * 非法字段保留原值并返回错误；单独修改一个模式不会覆盖另一个模式。
  */
 export function mergeSettings(current, patch) {
@@ -119,7 +122,7 @@ export function mergeSettings(current, patch) {
   for (const mode of [MODES.normal, MODES.incognito]) {
     const modePatch = patch[mode];
     if (!modePatch || typeof modePatch !== 'object' || Array.isArray(modePatch)) continue;
-    const fields = mode === MODES.normal ? ['maxRecords'] : ['recentMaxRecords', 'historyMaxRecords'];
+    const fields = mode === MODES.normal ? ['maxRecords', 'historyMaxRecords'] : ['recentMaxRecords', 'historyMaxRecords'];
     for (const field of fields) {
       if (!Object.prototype.hasOwnProperty.call(modePatch, field)) continue;
       const result = validateMaxRecords(modePatch[field]);
@@ -133,7 +136,9 @@ export function mergeSettings(current, patch) {
 
 export function modeMaxRecords(settings, mode, view = VIEWS.recent) {
   const normalized = normalizeSettings(settings);
-  if (mode !== MODES.incognito) return normalized.normal.maxRecords;
+  if (mode !== MODES.incognito) {
+    return view === VIEWS.history ? normalized.normal.historyMaxRecords : normalized.normal.maxRecords;
+  }
   return view === VIEWS.history
     ? normalized.incognito.historyMaxRecords
     : normalized.incognito.recentMaxRecords;
@@ -141,7 +146,7 @@ export function modeMaxRecords(settings, mode, view = VIEWS.recent) {
 
 /** 供界面显示的中文错误文案。 */
 export function describeFieldError(field, reason) {
-  if (['popupWidth', 'normal.maxRecords', 'incognito.maxRecords', 'incognito.recentMaxRecords', 'incognito.historyMaxRecords'].includes(field)) {
+  if (['popupWidth', 'normal.maxRecords', 'normal.historyMaxRecords', 'incognito.maxRecords', 'incognito.recentMaxRecords', 'incognito.historyMaxRecords'].includes(field)) {
     const isWidth = field === 'popupWidth';
     const limits = LIMITS[isWidth ? 'popupWidth' : 'maxRecords'];
     const range = `${limits.min}–${limits.max}`;

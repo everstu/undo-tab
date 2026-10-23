@@ -11,6 +11,7 @@ import { launchChrome, waitFor } from './chrome-harness.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = path.join(root, '.tmp');
+const screenshotDir = path.join(tempRoot, 'screenshots');
 await mkdir(tempRoot, { recursive: true });
 const profileDir = await mkdtemp(path.join(tempRoot, 'limits-ui-'));
 let harness;
@@ -119,7 +120,8 @@ try {
   const shot = await harness.browser.send('Page.captureScreenshot', {
     format: 'png', clip: { x: 0, y: 0, width: 360, height: 580, scale: 1 },
   }, tab.sessionId);
-  await writeFile(path.join(root, 'docs', 'independent-limits-settings.png'), Buffer.from(shot.data, 'base64'));
+  await mkdir(screenshotDir, { recursive: true });
+  await writeFile(path.join(screenshotDir, 'independent-limits-settings.png'), Buffer.from(shot.data, 'base64'));
   console.log('通过：模拟无痕上下文中的双输入框、迁移初值、取消、独立保存/裁剪、非法值、页脚上限与 360px 布局。');
 } finally {
   // 仅删除本脚本创建、且已确认位于任务临时目录内的独立 profile。

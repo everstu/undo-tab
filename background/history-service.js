@@ -1,3 +1,4 @@
+import { DEFAULT_SETTINGS, MAX_QUERY_LENGTH } from '../shared/constants.js';
 import { fallbackTitle, urlKey } from '../shared/urls.js';
 
 /**
@@ -9,11 +10,22 @@ export function createHistoryService({ chromeApi }) {
 
   return {
     async searchNormal(query, maxResults) {
-      const text = typeof query === 'string' ? query.trim().slice(0, 200) : '';
-      const limit = Number.isInteger(maxResults) && maxResults > 0 ? maxResults : 500;
-      const items = await chromeApi.history.search({ text, startTime: 0, maxResults: limit });
-      const entries = (Array.isArray(items) ? items : [])
-        .filter((item) => item && urlKey(item.url) && Number.isFinite(item.lastVisitTime))
+      const text = typeof query === 'string' ? query.trim().slice(0, MAX_QUERY_LENGTH) : '';
+      const limit = Number.isInteger(maxResults) && maxResults > 0 ? maxResults : DEFAULT_SETTINGS.normal.historyMaxRecords;
+      let requested = limit;
+      let candidates;
+      // API 上限包含 file:// 等不可展示项；逐步扩大查询，直到有效项足够或结果耗尽。
+      // 重查同一前缀，避免按时间翻页漏掉同一毫秒内的记录。
+      while (true) {
+        const result = await chromeApi.history.search({ text, startTime: 0, maxResults: requested });
+        const items = Array.isArray(result) ? result : [];
+        candidates = items.filter((item) => item && urlKey(item.url) && Number.isFinite(item.lastVisitTime));
+        if (candidates.length >= limit || items.length < requested) break;
+        requested *= 2;
+      }
+      const entries = candidates
+        .sort((a, b) => b.lastVisitTime - a.lastVisitTime)
+        .slice(0, limit)
         .map((item) => {
           const key = urlKey(item.url);
           return {
@@ -25,8 +37,7 @@ export function createHistoryService({ chromeApi }) {
             visitCount: Number.isInteger(item.visitCount) && item.visitCount > 0 ? item.visitCount : 0,
             hasFavicon: true,
           };
-        })
-        .sort((a, b) => b.lastVisitedAt - a.lastVisitedAt);
+        });
       return { entries, loaded: entries.length, limit };
     },
   };

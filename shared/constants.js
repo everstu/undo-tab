@@ -51,8 +51,8 @@ export const DEFAULT_POPUP_WIDTH = 440;
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SCHEMA_VERSION,
   popupWidth: DEFAULT_POPUP_WIDTH,
-  normal: Object.freeze({ maxRecords: 500 }),
-  incognito: Object.freeze({ recentMaxRecords: 500, historyMaxRecords: 500 }),
+  normal: Object.freeze({ maxRecords: 100, historyMaxRecords: 100 }),
+  incognito: Object.freeze({ recentMaxRecords: 100, historyMaxRecords: 100 }),
 });
 
 /** 弹窗每页条数 */

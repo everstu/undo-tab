@@ -1,5 +1,6 @@
 import {
   DEFAULT_POPUP_WIDTH,
+  DEFAULT_SETTINGS,
   MODES,
   MESSAGES,
   PAGE_SIZE,
@@ -52,6 +53,7 @@ const ui = {
   maxRecordsError: document.getElementById('max-records-error'),
   maxRecordsStatus: document.getElementById('max-records-status'),
   historyLimitBlock: document.getElementById('history-limit-block'),
+  historyMaxRecordsLabel: document.getElementById('history-max-records-label'),
   historyMaxRecords: document.getElementById('history-max-records'),
   saveHistoryMaxRecords: document.getElementById('save-history-max-records'),
   historyMaxRecordsError: document.getElementById('history-max-records-error'),
@@ -99,7 +101,7 @@ const state = {
   total: 0,
   matchCount: 0,
   loaded: 0,
-  limit: 500,
+  limit: DEFAULT_SETTINGS.normal.maxRecords,
   limitReached: false,
   sessionId: null,
   sessionActive: false,
@@ -587,6 +589,9 @@ function syncSettingsFields({ force = false } = {}) {
   }
   ui.maxScopeDesc.textContent = maxScopeText(state.mode);
   ui.maxRecordsLabel.textContent = maxLabel(state.mode);
+  ui.historyMaxRecordsLabel.textContent = state.mode === MODES.incognito
+    ? '历史记录最多保留多少条'
+    : '历史记录最多展示多少条';
   ui.dataNote.textContent = dataNote(state.mode);
   ui.incognitoStatus.textContent = state.sessionActive
     ? '本次无痕会话有效；关闭最后一个无痕窗口后，最近关闭与访问历史会自动清空。'
@@ -597,7 +602,7 @@ function syncSettingsFields({ force = false } = {}) {
 function syncSettingsSections() {
   const incognito = state.mode === MODES.incognito;
   ui.incognitoBlock.hidden = !incognito;
-  ui.historyLimitBlock.hidden = !incognito;
+  ui.historyLimitBlock.hidden = false;
   const clearable = canClear(state.mode, state.view);
   ui.clearViewBlock.hidden = !clearable;
   if (clearable) {

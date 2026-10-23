@@ -7,7 +7,6 @@
 
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 export const CHROME_PATH =
@@ -100,8 +99,9 @@ export async function launchChrome({
 }) {
   let dir = profileDir;
   if (!dir) {
-    await mkdir(path.resolve('.tmp'), { recursive: true });
-    dir = await mkdtemp(path.join(tmpdir(), 'undo-tab-chrome-'));
+    const tempRoot = path.resolve(extensionPath, '.tmp');
+    await mkdir(tempRoot, { recursive: true });
+    dir = await mkdtemp(path.join(tempRoot, 'chrome-profile-'));
   } else {
     await mkdir(dir, { recursive: true });
   }

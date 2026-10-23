@@ -1,7 +1,7 @@
 # Undo Tab 修改方案：按窗口隔离、最近关闭与历史记录
 
 > 本文保留当前扩展的需求依据与实现约束；后续开发同时遵循根目录的 [AGENTS.md](../AGENTS.md)。
-> 日期：2026-10-22。完成状态以当前代码和 [MANUAL_TESTS.md](MANUAL_TESTS.md) 中实际执行的验证记录为准。
+> 日期：2026-10-23。完成状态以当前代码和 [MANUAL_TESTS.md](MANUAL_TESTS.md) 中实际执行的验证记录为准。
 
 ## 1. 已确定的产品规则
 
@@ -26,20 +26,20 @@
 
 ### 2.1 条数分别配置、分别计算
 
-普通使用 normal.maxRecords；无痕最近关闭使用 incognito.recentMaxRecords，无痕历史记录使用 incognito.historyMaxRecords。三个值默认均为 500，允许 1–10000 的整数。无痕设置页提供两个输入框和各自的保存按钮，不提供模式切换器。
+普通最近关闭使用 normal.maxRecords，普通历史展示使用 normal.historyMaxRecords；无痕最近关闭使用 incognito.recentMaxRecords，无痕历史记录使用 incognito.historyMaxRecords。四个值默认均为 100，允许 1–10000 的整数。两种模式的设置页各提供两个输入框和各自的保存按钮，不提供模式切换器。
 
 具体配额口径：
 
 - 普通“最近关闭”：去重后最多保留 normal.maxRecords 个网址，超过后删除最旧项。
 - 无痕“最近关闭”：去重后最多保留 incognito.recentMaxRecords 个网址，超过后删除最旧项。
 - 无痕“历史记录”：去重后最多保留 incognito.historyMaxRecords 个网址，与最近关闭上限分别配置。
-- 普通“历史记录”：每次搜索最多展示 normal.maxRecords 条匹配的 Chrome 历史；这个限制不裁剪、不删除 Chrome 自带历史。
+- 普通“历史记录”：每次搜索最多展示 normal.historyMaxRecords 条匹配的有效 http/https Chrome 历史；这个限制不裁剪、不删除 Chrome 自带历史，也不裁剪普通最近关闭。
 
-例如两种模式上限都是 500：普通最近关闭有 500 条时，无痕最近关闭仍可保存 500 条，不是两边合计 500。一次访问后关闭，可以在“历史记录”和“最近关闭”各出现一次，这是两种用途的数据，不是关闭记录重复。
+例如两种模式上限都是 100：普通最近关闭有 100 条时，无痕最近关闭仍可保存 100 条，不是两边合计 100。一次访问后关闭，可以在“历史记录”和“最近关闭”各出现一次，这是两种用途的数据，不是关闭记录重复。
 
-页脚只显示当前模式、当前标签的数量。例如“共 32 条 · 上限 500”；搜索时显示“匹配 4 条”。普通历史显示“已载入 500 条 · 展示上限 500”，不能把受查询上限限制的条数宣称为浏览器全部历史总数。
+页脚只显示当前模式、当前标签的数量。例如“共 32 条 · 上限 100”；搜索时显示“匹配 4 条”。普通历史显示“已载入 100 条 · 展示上限 100”，不能把受查询上限限制的条数宣称为浏览器全部历史总数。
 
-下调上限时，只裁剪对应的自有集合。无痕确认文案仅说明当前修改的列表将删多少条，并提示另一列表不受影响；不触碰另一模式，不删除 Chrome 历史。上调上限不会找回已淘汰记录。旧 incognito.maxRecords 自动回填到两个新字段，之后分别持久保存。
+下调上限时，只裁剪对应的自有集合。普通历史展示上限直接保存，不产生删除确认。无痕确认文案仅说明当前修改的列表将删多少条，并提示另一列表不受影响；不触碰另一模式，不删除 Chrome 历史。上调自有集合的上限不会找回已淘汰记录。旧 incognito.maxRecords 自动回填到两个新字段；缺少 normal.historyMaxRecords 时继承原普通上限，之后分别持久保存。
 
 ### 2.2 沿用宽度功能
 
@@ -85,11 +85,11 @@ popupWidth 默认 440px，允许 360–800px，普通与无痕共用；保存后
 chrome.history.search({
   text: query.trim(),
   startTime: 0,
-  maxResults: settings.normal.maxRecords
+  maxResults: settings.normal.historyMaxRecords
 });
 ```
 
-明确传 startTime: 0，避免 API 默认仅搜索最近 24 小时。搜索直接交给 Chrome，对匹配结果按 lastVisitTime 倒序，在本扩展内每页 50 条展示。只展示可打开的 http/https 网址。
+明确传 startTime: 0，避免 API 默认仅搜索最近 24 小时。搜索直接交给 Chrome，对匹配结果按 lastVisitTime 倒序，在本扩展内每页 50 条展示。只展示可打开的 http/https 网址。上例是首次查询；API 的 maxResults 包含 file 等不可展示项，过滤后不足上限且原始结果未耗尽时，倍增 maxResults 重查，直到有效结果足够或结果耗尽，再按展示上限截断。各次查询保留原搜索词与 startTime: 0；不按时间游标跳过同一毫秒内的记录。
 
 不要先取最近 N 条空搜索结果，再仅在这 N 条里查关键词；否则较早但匹配的记录会被漏掉。查询结果达到 N 条时说明已达到展示上限，不承诺完整列出全部匹配项。
 
@@ -127,7 +127,7 @@ chrome.history.search({
 
 | 存储区 | Key | 内容 |
 | --- | --- | --- |
-| storage.local | settings | schemaVersion: 2、popupWidth、normal.maxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords |
+| storage.local | settings | schemaVersion: 2、popupWidth、normal.maxRecords、normal.historyMaxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords |
 | storage.local | normal.recent | 普通关闭条目及清空代次 |
 | storage.session | normal.liveTabs | 普通活动标签快照 |
 | storage.session | normal.pendingCloses | 普通待补写关闭事件 |
@@ -139,8 +139,8 @@ chrome.history.search({
 {
   schemaVersion: 2,
   popupWidth: 440,
-  normal: { maxRecords: 500 },
-  incognito: { recentMaxRecords: 500, historyMaxRecords: 500 }
+  normal: { maxRecords: 100, historyMaxRecords: 100 },
+  incognito: { recentMaxRecords: 100, historyMaxRecords: 100 }
 }
 ```
 
@@ -220,7 +220,7 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 - 切换标签保留搜索词，页码回第一页，滚动回顶部；每次重开弹窗默认最近关闭、空搜索。
 - 每页 50 条；无匹配时显示 0/0；删除或去重置顶后收敛页码。
 - 关闭网址重新打开后，最近关闭条目保留；再次关闭只更新并置顶，不增加第二条。
-- 设置页仅修改当前模式的上限；无痕最近关闭与历史分别输入、保存、预览裁剪，宽度设置共用。
+- 设置页仅修改当前模式的上限；两种模式的最近关闭与历史均分别输入、保存。自有集合独立预览裁剪，普通历史只调整展示，宽度设置共用。
 
 操作边界：普通最近关闭支持单删/清空；普通历史提供查询和打开，以及 Chrome 历史管理入口。无痕最近关闭和自建历史分别支持单删/清空；可在设置中“清空本次记录”，确认后清除本次无痕会话的两个集合及旧待写，不影响普通数据。
 
@@ -256,7 +256,7 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 
 当前 settings.schemaVersion 为 1，历史是 local 中的 history.records 混合数组。升级到 schemaVersion: 2，在后台初始化队列中进行幂等迁移：
 
-1. 保留 popupWidth；将旧 maxRecords 分别作为 normal.maxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords 的初值，非法或缺失值用默认值。已有 schema 2 的 incognito.maxRecords 同样回填两个字段，新的合法独立值优先保留。
+1. 保留 popupWidth；将旧 maxRecords 分别作为 normal.maxRecords、normal.historyMaxRecords、incognito.recentMaxRecords、incognito.historyMaxRecords 的初值，非法或缺失且没有合法旧值时用默认值 100。已有 schema 2 缺少 normal.historyMaxRecords 时继承原普通上限，incognito.maxRecords 同样回填两个字段，新的合法独立值优先保留；重复迁移不重置已保存的值。
 2. 读取旧 history.records，只保留 mode === normal 的有效 http/https 记录；若新 normal.recent 已存在，同时读取它，避免中途失败后重试覆盖已经迁移的数据。
 3. 合并新旧普通记录后按完整 URL 去重，保留同 URL 中最后关闭的记录及元数据，写入 normal.recent，并按普通上限裁剪。旧 key 已不存在时，不能把现有新集合覆盖成空数组。
 4. 删除旧混合历史 key，清除旧 live.tabs 中遗留的无痕快照及无痕待写。普通活动快照按新结构重建；有效的普通 pendingClose 单独迁入 normal.pendingCloses，保留原事件时间及幂等标识，再删除旧 live.tabs。
@@ -307,7 +307,8 @@ worker 初始化时，必须先核对现存无痕窗口、结束已失效会话�
 | URL 去重 | 同一模式相同完整 URL 连关两次，只有一条，时间/标题/顺序更新 |
 | URL 区别 | 不同 query 或 fragment 的网址分别保留；普通/无痕同 URL 各自独立 |
 | 重试新旧 | 较旧失败事件晚补写，不覆盖较新关闭记录或造成重复 |
-| 独立上限 | 普通上限设 4、无痕最近关闭设 2、无痕历史设 3，各自保留最新不同 URL 的 4/2/3 条；保存其中一个无痕上限不裁剪另一列表 |
+| 独立上限 | 普通最近关闭设 4、普通历史展示设 5、无痕最近关闭设 2、无痕历史设 3，各自保留或展示 4/5/2/3 条；修改其中一项不裁剪其他列表 |
+| 历史过滤补足 | 混入 file 等历史后，仍展示满设定的 100/200 条有效网页；不足时返回实际条数，Chrome 历史不被删除 |
 | 独立视图计数 | 无痕最近关闭与访问历史各自计数/裁剪；普通历史只限显示，不删除 Chrome 数据 |
 | 多无痕窗口 | 关闭一个但还剩另一个时，两个无痕列表均保留 |
 | 最终自动清空 | 关闭最后一个无痕窗口，最近关闭、访问历史、快照、pending及运行时缓存全部清空；普通完全不受影响 |

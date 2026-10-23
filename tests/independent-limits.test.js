@@ -69,7 +69,7 @@ test('保存与裁剪预览只影响指定的无痕列表，修改后持久保�
   assert.equal((await query('history')).data.total, 2);
   const reopened = createSettingsStore({ localArea: chrome.storage.local });
   assert.deepEqual(await reopened.get(), {
-    schemaVersion: 2, popupWidth: 600, normal: { maxRecords: 7 },
+    schemaVersion: 2, popupWidth: 600, normal: { maxRecords: 7, historyMaxRecords: 7 },
     incognito: { recentMaxRecords: 1, historyMaxRecords: 2 },
   });
 
@@ -106,7 +106,67 @@ test('旧无痕上限升级后两个值分别持久保存且不删除历史', as
   await worker.ensureReady();
   assert.deepEqual(chrome.storage.local.data.settings.incognito, { recentMaxRecords: 42, historyMaxRecords: 42 });
   assert.equal(chrome.storage.local.data.settings.popupWidth, 700);
+  assert.deepEqual(chrome.storage.local.data.settings.normal, { maxRecords: 7, historyMaxRecords: 7 });
   assert.equal((await worker.stores.normalStore.getEntries())[0].url, 'https://example.com/kept');
+  const writes = chrome.storage.local.control.writes;
+  await createSettingsStore({ localArea: chrome.storage.local }).ensure();
+  assert.equal(chrome.storage.local.control.writes, writes);
+});
+
+test('普通 worker 的最近关闭与历史独立设置，历史上限只限制展示并补足过滤缺口', async () => {
+  const chrome = createMockChrome({ windows: [{ id: 1, incognito: false }] });
+  chrome.storage.local.data.settings = {
+    schemaVersion: 2, popupWidth: 600,
+    normal: { maxRecords: 4, historyMaxRecords: 3 }, incognito: { ...limits },
+  };
+  const history = Array.from({ length: 210 }, (_, index) => ({
+    url: index % 100 === 0 ? `file:///test-${index}` : `https://example.com/history-${index}`,
+    title: 'History', lastVisitTime: 10000 - index,
+  }));
+  chrome.__test.setHistory(history);
+  const worker = createUndoTabWorker({ chrome, logger: { warn() {} } });
+  await worker.ensureReady();
+  for (let index = 0; index < 6; index += 1) {
+    const tab = chrome.__test.addTab({ windowId: 1, url: `https://example.com/recent-${index}` });
+    chrome.__test.removeTab(tab.id);
+    await worker.queue(async () => {});
+  }
+  const query = (view) => send(chrome, { type: 'undoTab:queryView', windowId: 1, view, query: '' });
+  const recent = await query('recent');
+  assert.equal(recent.data.total, 4);
+  assert.equal(recent.data.limit, 4);
+  assert.equal((await query('history')).data.loaded, 3);
+  const before = structuredClone(chrome.storage.local.data['normal.recent']);
+  const preview = await send(chrome, { type: 'undoTab:getTrimPreview', windowId: 1, view: 'history', maxRecords: 1 });
+  assert.equal(preview.data.recent, 0);
+  assert.equal(preview.data.history, 0);
+  const saved = await send(chrome, { type: 'undoTab:updateSettings', windowId: 1, view: 'history', patch: { maxRecords: 1 } });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.data.settings.normal, { maxRecords: 4, historyMaxRecords: 1 });
+  assert.deepEqual(chrome.storage.local.data['normal.recent'], before);
+  assert.equal((await query('history')).data.loaded, 1);
+
+  await send(chrome, { type: 'undoTab:updateSettings', windowId: 1, view: 'recent', patch: { maxRecords: 2 } });
+  assert.equal((await query('recent')).data.total, 2);
+  assert.equal((await query('history')).data.limit, 1);
+  await send(chrome, { type: 'undoTab:updateSettings', windowId: 1, view: 'history', patch: { maxRecords: 200 } });
+  const expanded = await query('history');
+  assert.equal(expanded.data.loaded, 200);
+  assert.equal(expanded.data.limitReached, true);
+  assert.deepEqual((await createSettingsStore({ localArea: chrome.storage.local }).get()).normal,
+    { maxRecords: 2, historyMaxRecords: 200 });
+  assert.deepEqual(chrome.storage.local.data.settings.incognito, limits);
+  assert.equal(chrome.storage.local.data.settings.popupWidth, 600);
+  assert.equal((await chrome.history.search({ text: '', startTime: 0, maxResults: 1000 })).length, history.length);
+  const snapshot = await chrome.storage.local.get(null);
+  assert.equal(JSON.stringify(snapshot).includes('history-1'), false);
+  for (const maxRecords of [0, 10001, 1.5, '']) {
+    const failed = await send(chrome, { type: 'undoTab:updateSettings', windowId: 1, view: 'history', patch: { maxRecords } });
+    assert.equal(failed.ok, false);
+  }
+  const invalidView = await send(chrome, { type: 'undoTab:updateSettings', windowId: 1, view: 'invalid', patch: { maxRecords: 1 } });
+  assert.equal(invalidView.ok, false);
+  assert.deepEqual(await chrome.storage.local.get(null), snapshot);
 });
 
 test('worker 重建后补写混合 pending 时分别按两个上限裁剪', async () => {
